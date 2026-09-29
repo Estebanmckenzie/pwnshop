@@ -6,7 +6,6 @@ const bcrypt = require('bcryptjs');
 const express = require('express');
 const bodyParser = require('body-parser');
 const session = require('express-session');
-const mysql = require('mysql2');
 const multer = require('multer');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
@@ -17,25 +16,14 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const RESEND_FROM = process.env.RESEND_FROM || 'noreply@pwnshop.com';
 const app = express();
 
-const db = mysql.createPool({
-    host:     process.env.DB_HOST     || 'localhost',
-    port:     parseInt(process.env.DB_PORT || '3306', 10),
-    user:     process.env.DB_USER     || 'root',
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME     || 'pwnshop',
-    waitForConnections: true,
-    connectionLimit: parseInt(process.env.DB_POOL_LIMIT || '2', 10),
-    queueLimit: 0
-});
+const { db } = require('./shared/db');
+const { auditLog } = require('./shared/audit-core');
+require('./shared/migrations');   // migraciones al arrancar
+const { VULNBANK_CHARGE_PATH, VULNBANK_LAB_VULN } = require('./shared/config');
+const { isVulnbankConfigured, getVulnbankReference, getVulnbankAmount, extractVulnbankErrorMessage, isVulnbankSuccess, buildVulnbankVerifyPath, vulnbankRequest } = require('./shared/vulnbank');
+const { globalGetLimiter, adminLoginLimiter, loginLimiter, registerLimiter, checkoutLimiter, searchLimiter, addProductLimiter, reviewLimiter, avatarLimiter, forgotPasswordLimiter, resetPasswordLimiter, wishlistLimiter, cartLimiter, couponLimiter, trackLimiter, sellerPreviewLimiter, registerSellerLimiter, accountDeleteLimiter, mailReadLimiter } = require('./shared/rate-limiters');
+const { resolveDeals, requireAdmin } = require('./shared/helpers');
 
-db.getConnection((err, conn) => {
-    if (err) {
-        console.error('Database pool init failed:', err.stack);
-        return;
-    }
-    console.log('Connected to database pool.');
-    conn.release();
-});
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
@@ -72,7 +60,6 @@ const avatarUpload = multer({
         const ext = file.originalname.split('.').pop().toLowerCase();
 
 
-
         if (!ALLOWED_AVATAR_MIMES.includes(file.mimetype) || !ALLOWED_AVATAR_EXTS.includes(ext)) {
             return cb(new Error('Only image files are allowed (jpg, png, gif, webp, svg)'));
         }
@@ -91,18 +78,6 @@ app.use((req, res, next) => {
 app.locals.fmtPrice = (v) =>
     parseFloat(v || 0).toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 
-function resolveDeals(products) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const list = Array.isArray(products) ? products : [products];
-    list.forEach(p => {
-        if (p && p.deal_expires_at && new Date(p.deal_expires_at) < today) {
-            p.deal_price = null;
-            p.deal_label = null;
-        }
-    });
-    return products;
-}
 
 function generateResetToken() {
     return Math.floor(100000 + Math.random() * 900000).toString();
@@ -115,46 +90,6 @@ function sendMail(userId, toEmail, subject, body) {
     );
 }
 
-function ensureAuditTable(cb) {
-    db.query(
-        `CREATE TABLE IF NOT EXISTS audit_log (
-            id         INT AUTO_INCREMENT PRIMARY KEY,
-            user_id    INT DEFAULT NULL,
-            action     VARCHAR(60) NOT NULL,
-            detail     TEXT,
-            ip         VARCHAR(120),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`,
-        cb
-    );
-}
-
-ensureAuditTable(() => {});
-
-/* Safe migration helper for MySQL 5.7 - ignores error 1060 (duplicate column) */
-function addCol(sql) { db.query(sql, (e) => { if (e && e.errno !== 1060) console.error('[migration]', e.message); }); }
-
-/* New business logic columns */
-addCol("ALTER TABLE users          ADD COLUMN pending_balance DECIMAL(12,2) DEFAULT 0");
-addCol("ALTER TABLE users          ADD COLUMN referral_code   VARCHAR(16)   DEFAULT NULL");
-addCol("ALTER TABLE orders         ADD COLUMN delivery_zone   VARCHAR(20)   DEFAULT 'others'");
-addCol("ALTER TABLE orders         ADD COLUMN logistics_fee   DECIMAL(10,2) DEFAULT 0");
-addCol("ALTER TABLE orders         ADD COLUMN commission_amt  DECIMAL(10,2) DEFAULT 0");
-addCol("ALTER TABLE orders         ADD COLUMN vat_amt         DECIMAL(10,2) DEFAULT 0");
-addCol("ALTER TABLE seller_earnings ADD COLUMN vat_amount              DECIMAL(10,2) DEFAULT 0");
-addCol("ALTER TABLE users          ADD COLUMN default_shipping_address TEXT          DEFAULT NULL");
-addCol("ALTER TABLE users          ADD COLUMN default_zone             VARCHAR(20)   DEFAULT 'others'");
-addCol("ALTER TABLE users          ADD COLUMN seller_wallet            DECIMAL(12,2) DEFAULT 0");
-/* Seed referral codes for existing users that don't have one */
-db.query("UPDATE users SET referral_code = CONCAT('PWN', UPPER(SUBSTRING(MD5(id), 1, 8))) WHERE referral_code IS NULL", () => {});
-
-addCol("ALTER TABLE coupons ADD COLUMN max_uses_per_user INT DEFAULT 1");
-addCol("ALTER TABLE coupons ADD COLUMN max_total_uses    INT DEFAULT NULL");
-addCol("ALTER TABLE coupons ADD COLUMN allowed_category  VARCHAR(50) DEFAULT NULL");
-addCol("ALTER TABLE coupons ADD COLUMN total_used        INT DEFAULT 0");
-addCol("ALTER TABLE products ADD COLUMN deal_price      DECIMAL(10,2) DEFAULT NULL");
-addCol("ALTER TABLE products ADD COLUMN deal_label      VARCHAR(100)  DEFAULT NULL");
-addCol("ALTER TABLE products ADD COLUMN deal_expires_at DATE          DEFAULT NULL");
 
 function seedDeals() {
     const targets = [
@@ -178,33 +113,7 @@ function seedDeals() {
 }
 setTimeout(seedDeals, 3000);
 setInterval(seedDeals, 30 * 60 * 1000);
-db.query(`CREATE TABLE IF NOT EXISTS coupon_uses (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
-    coupon_id  INT NOT NULL,
-    user_id    INT NOT NULL,
-    order_id   INT DEFAULT NULL,
-    used_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)`, () => {});
 
-// Tracks Vulnbank payment references - used to prevent replay attacks in strict mode
-db.query(`CREATE TABLE IF NOT EXISTS vulnbank_tx_log (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
-    user_id    INT NOT NULL,
-    reference  VARCHAR(255) NOT NULL,
-    amount     DECIMAL(12,2) NOT NULL,
-    flow       VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)`, () => {});
-
-function auditLog(userId, action, detail, req) {
-
-    const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
-
-    db.query(
-        'INSERT INTO audit_log (user_id, action, detail, ip) VALUES (?, ?, ?, ?)',
-        [userId || null, action, String(detail).substring(0, 1000), ip]
-    );
-}
 
 /* Commission rates by product category (master plan v2) */
 const CATEGORY_COMMISSION = {
@@ -255,197 +164,6 @@ function getZoneFee(zone) {
     return ZONE_FEE[zone.toLowerCase().trim()] || DEFAULT_ZONE_FEE;
 }
 
-const VULNBANK_BASE_URL = process.env.VULNBANK_BASE_URL || '';
-const VULNBANK_MERCHANT_API_KEY = process.env.VULNBANK_MERCHANT_API_KEY || '';
-const VULNBANK_MERCHANT_JWT = process.env.VULNBANK_MERCHANT_JWT || '';
-const VULNBANK_AUTH_MODE = (process.env.VULNBANK_AUTH_MODE || 'api_key_header').toLowerCase();
-const VULNBANK_CHARGE_PATH = process.env.VULNBANK_CHARGE_PATH || '/api/v1/payments/charge';
-const VULNBANK_VERIFY_PATH = process.env.VULNBANK_VERIFY_PATH || '/api/v1/payments/{payment_id}';
-const VULNBANK_TIMEOUT_MS = parseInt(process.env.VULNBANK_TIMEOUT_MS || '12000', 10);
-const VULNBANK_LAB_VULN = process.env.VULNBANK_LAB_VULN === '1';
-
-function isVulnbankConfigured() {
-    const hasAuth = VULNBANK_AUTH_MODE === 'jwt'
-        ? !!VULNBANK_MERCHANT_JWT
-        : !!VULNBANK_MERCHANT_API_KEY;
-    return !!(VULNBANK_BASE_URL && hasAuth);
-}
-
-function vulnbankUnwrap(payload) {
-    if (!payload || typeof payload !== 'object') return {};
-    if (payload.data && typeof payload.data === 'object') return payload.data;
-    return payload;
-}
-
-function getVulnbankStatus(payload) {
-    const flat = vulnbankUnwrap(payload);
-    const inner = payload.payment || {};
-    return String(
-        flat.status || flat.payment_status ||
-        inner.status || inner.payment_status ||
-        payload.status || ''
-    ).toLowerCase();
-}
-
-function getVulnbankReference(payload) {
-    const flat = vulnbankUnwrap(payload);
-    const inner = payload.payment || {};
-    return flat.reference || flat.tx_ref || flat.transaction_reference || flat.id ||
-           inner.id || inner.reference || inner.tx_ref || '';
-}
-
-function getVulnbankAmount(payload) {
-    const flat = vulnbankUnwrap(payload);
-    const inner = payload.payment || {};
-    const candidates = [
-        flat.amount, flat.amount_charged, flat.paid_amount, flat.value,
-        payload.amount, payload.amount_charged,
-        inner.amount, inner.amount_charged
-    ];
-    for (const c of candidates) {
-        const n = parseFloat(c);
-        if (!isNaN(n)) return n;
-    }
-    return null;
-}
-
-function extractVulnbankErrorMessage(err, fallback = 'Vulnbank request failed', maxLen = 220) {
-    const payload = err && err.payload && typeof err.payload === 'object' ? err.payload : null;
-    if (payload) {
-        const candidates = [
-            payload.message,
-            payload.error,
-            payload.detail,
-            payload.reason,
-            payload.error_message,
-            payload.user_message,
-            payload.debug_info && payload.debug_info.message,
-            payload.debug_info && payload.debug_info.error
-        ];
-
-        const direct = candidates.find((v) => typeof v === 'string' && v.trim());
-        if (direct) return direct.trim().slice(0, maxLen);
-
-        if (Array.isArray(payload.errors) && payload.errors.length) {
-            const first = payload.errors[0];
-            if (typeof first === 'string' && first.trim()) return first.trim().slice(0, maxLen);
-            if (first && typeof first === 'object') {
-                const nested = [first.message, first.error, first.detail].find((v) => typeof v === 'string' && v.trim());
-                if (nested) return nested.trim().slice(0, maxLen);
-            }
-        }
-    }
-
-    if (err && typeof err.message === 'string' && err.message.trim()) {
-        return err.message.trim().slice(0, maxLen);
-    }
-    return fallback;
-}
-
-function isVulnbankSuccess(payload) {
-    const status = getVulnbankStatus(payload);
-    return ['success', 'succeeded', 'approved', 'completed', 'paid'].includes(status);
-}
-
-function normalizeVulnbankPath(relativePath) {
-    if (!relativePath) return '/';
-    if (relativePath.startsWith('/')) return relativePath;
-    return '/' + relativePath;
-}
-
-function buildVulnbankVerifyPath(referenceOrId) {
-    if (!VULNBANK_VERIFY_PATH) return null;
-    if (!referenceOrId) return null;
-    if (!(VULNBANK_VERIFY_PATH.includes('{reference}') || VULNBANK_VERIFY_PATH.includes('{payment_id}'))) {
-        return null;
-    }
-
-    return VULNBANK_VERIFY_PATH
-        .replace('{reference}', encodeURIComponent(referenceOrId))
-        .replace('{payment_id}', encodeURIComponent(referenceOrId));
-}
-
-function vulnbankRequest(relativePath, method = 'POST', payload = null) {
-    return new Promise((resolve, reject) => {
-        if (!isVulnbankConfigured()) {
-            return reject(new Error('Vulnbank is not configured'));
-        }
-
-        let target;
-        try {
-            target = new URL(normalizeVulnbankPath(relativePath), VULNBANK_BASE_URL);
-        } catch (_) {
-            return reject(new Error('Invalid Vulnbank URL configuration'));
-        }
-
-        const body = payload ? JSON.stringify(payload) : null;
-        const transport = target.protocol === 'http:' ? http : https;
-        const options = {
-            hostname: target.hostname,
-            port: target.port || (target.protocol === 'http:' ? 80 : 443),
-            path: target.pathname + target.search,
-            method,
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        };
-
-        if (VULNBANK_AUTH_MODE === 'jwt') {
-            options.headers['Authorization'] = 'Bearer ' + VULNBANK_MERCHANT_JWT;
-        } else {
-            options.headers['X-Merchant-Api-Key'] = VULNBANK_MERCHANT_API_KEY;
-        }
-
-        if (body) options.headers['Content-Length'] = Buffer.byteLength(body);
-
-        // DEBUG: Log the request details
-        console.log('[Vulnbank Request]', {
-            url: target.toString(),
-            method,
-            authMode: VULNBANK_AUTH_MODE,
-            hasApiKey: !!VULNBANK_MERCHANT_API_KEY,
-            hasJwt: !!VULNBANK_MERCHANT_JWT
-        });
-
-        const req = transport.request(options, (resp) => {
-            let raw = '';
-            resp.on('data', (chunk) => { raw += chunk; });
-            resp.on('end', () => {
-                let parsed = {};
-                if (raw && raw.trim()) {
-                    try {
-                        parsed = JSON.parse(raw);
-                    } catch (_) {
-                        parsed = { raw };
-                    }
-                }
-                
-                // DEBUG: Log full response
-                console.log('[Vulnbank Response]', {
-                    statusCode: resp.statusCode,
-                    contentType: resp.headers['content-type'],
-                    body: parsed
-                });
-                
-                if (resp.statusCode >= 200 && resp.statusCode < 300) {
-                    return resolve(parsed);
-                }
-                const err = new Error('Vulnbank API error');
-                err.statusCode = resp.statusCode;
-                err.payload = parsed;
-                reject(err);
-            });
-        });
-
-        req.on('error', reject);
-        req.setTimeout(VULNBANK_TIMEOUT_MS, () => {
-            req.destroy(new Error('Vulnbank request timed out'));
-        });
-
-        if (body) req.write(body);
-        req.end();
-    });
-}
 
 const SEED_USER_IDS    = [1, 2, 3, 4, 5];
 const SEED_PRODUCT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
@@ -470,72 +188,6 @@ app.use((req, res, next) => {
 
 // visitor_stats uses the main db pool (metaDb pool caused a stall on Filess.io)
 
-// Rate limiter factory - hybrid IP + user ID
-const rateLimitMaps = new Map();
-
-function createRateLimiter(maxRequests, windowMs = 60 * 1000) {
-    const store = new Map();
-
-    // Clean up expired entries every 5 mins
-    setInterval(() => {
-        const now = Date.now();
-        for (const [key, entry] of store.entries()) {
-            if (now - entry.windowStart > windowMs) store.delete(key);
-        }
-    }, 5 * 60 * 1000);
-
-    return function rateLimiter(req, res, next) {
-        // Hybrid key: use user ID if logged in, otherwise IP
-        const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
-        const key = req.session && req.session.user ? `user:${req.session.user.id}` : `ip:${ip}`;
-        const now = Date.now();
-
-        if (!store.has(key)) {
-            store.set(key, { count: 1, windowStart: now });
-            return next();
-        }
-
-        const entry = store.get(key);
-
-        if (now - entry.windowStart > windowMs) {
-            entry.count = 1;
-            entry.windowStart = now;
-            return next();
-        }
-
-        entry.count++;
-        if (entry.count > maxRequests) {
-            const retryAfter = Math.ceil((windowMs - (now - entry.windowStart)) / 1000);
-            if (req.xhr || req.headers.accept?.includes('application/json')) {
-                return res.status(429).json({ error: 'Too many requests', retryAfter });
-            }
-            return res.status(429).send(`<h2>Too many requests. Please wait ${retryAfter} seconds.</h2>`);
-        }
-
-        next();
-    };
-}
-
-// Rate limiter instances
-const globalGetLimiter      = createRateLimiter(60);
-const adminLoginLimiter     = createRateLimiter(10);
-const loginLimiter          = createRateLimiter(30);
-const registerLimiter       = createRateLimiter(10);
-const checkoutLimiter       = createRateLimiter(20);
-const searchLimiter         = createRateLimiter(30);
-const addProductLimiter     = createRateLimiter(10);
-const reviewLimiter         = createRateLimiter(10);
-const avatarLimiter         = createRateLimiter(10);
-const forgotPasswordLimiter = createRateLimiter(10);
-const resetPasswordLimiter  = createRateLimiter(10);
-const wishlistLimiter       = createRateLimiter(30);
-const cartLimiter           = createRateLimiter(50);
-const couponLimiter         = createRateLimiter(20);
-const trackLimiter          = createRateLimiter(20);
-const sellerPreviewLimiter  = createRateLimiter(15);
-const registerSellerLimiter = createRateLimiter(5);
-const accountDeleteLimiter  = createRateLimiter(5);
-const mailReadLimiter       = createRateLimiter(30);
 
 // Global GET rate limit - protects against directory fuzzing
 app.use((req, res, next) => {
@@ -767,14 +419,6 @@ app.get('/login', (req, res) => {
 
 app.post('/login', loginLimiter, (req, res) => {
     const { username, password, next } = req.body;
-
-
-
-
-
-
-
-
 
 
     const query = `SELECT * FROM users WHERE (username='${username}' OR email='${username}')`;
@@ -1073,9 +717,6 @@ app.post('/profile/upload-avatar', avatarLimiter, (req, res) => {
         const fileUrl = '/uploads/' + req.file.filename;
 
 
-
-
-
         if (ext === 'svg') {
             try {
                 let svg = fs.readFileSync(req.file.path, 'utf8');
@@ -1278,7 +919,6 @@ app.get('/mail/:token', (req, res) => {
     const token = req.params.token;
 
 
-
     const loggedInId  = req.session.user?.id;
     const pendingId   = req.session.pendingUserId;
     const resetMailId = req.session.resetMailUserId;
@@ -1390,8 +1030,6 @@ app.post('/apply-coupon', couponLimiter, (req, res) => {
             }
 
 
-
-
             db.query(
                 'SELECT COUNT(*) AS cnt FROM coupon_uses WHERE coupon_id = ? AND user_id = ?',
                 [coupon.id, userId],
@@ -1403,9 +1041,6 @@ app.post('/apply-coupon', couponLimiter, (req, res) => {
                     if (usedCount >= maxPerUser) {
                         return res.json({ valid: false, message: `You have already used this coupon (limit: ${maxPerUser} per user)` });
                     }
-
-
-
 
 
                     if (coupon.allowed_category) {
@@ -1512,14 +1147,6 @@ app.post('/checkout', checkoutLimiter, (req, res) => {
     const vbCardExpiry = String(req.body.vb_card_expiry || '').trim();
     const vbCardCvv = String(req.body.vb_card_cvv || '').trim();
     const vbCardName = String(req.body.vb_card_name || req.session.user.username || '').trim();
-
-
-
-
-
-
-
-
 
 
     let coupon_code = req.body.coupon_code;
@@ -2187,10 +1814,6 @@ function autoProgressOrders() {
 
 setInterval(autoProgressOrders, 30000);
 
-function requireAdmin(req, res, next) {
-    if (!req.session.user || req.session.user.role !== 'admin') return res.redirect('/admin/login');
-    next();
-}
 
 app.get('/admin', requireAdmin, (req, res) => res.redirect('/admin/users'));
 
@@ -2568,7 +2191,6 @@ app.post('/track', trackLimiter, (req, res) => {
     if (!order_id) return res.render('track', { user: req.session.user, error: 'Please enter an order number.' });
 
 
-
     db.query('SELECT * FROM orders WHERE id = ?', [order_id], (err, orders) => {
         if (err || !orders.length) {
             return res.render('track', { user: req.session.user, error: 'Order not found. Please check your order number.' });
@@ -2642,7 +2264,6 @@ app.post('/reset', (req, res) => {
         `DELETE FROM password_resets WHERE user_id    NOT IN (${su})`,
 
 
-
         `DELETE FROM coupon_uses WHERE 1=1`,
 
 
@@ -2670,15 +2291,9 @@ app.post('/reset', (req, res) => {
         `UPDATE users SET avatar_url = NULL WHERE id IN (${su})`,
 
 
-
-
-
         `ALTER TABLE users    AUTO_INCREMENT = 6`,
         `ALTER TABLE products AUTO_INCREMENT = 12`,
     ];
-
-
-
 
 
     const dynamicTables = [
@@ -2694,7 +2309,6 @@ app.post('/reset', (req, res) => {
         if (i >= steps.length) return resetDynamicCounters();
         db.query(steps[i++], runNext);
     }
-
 
 
     let d = 0;
@@ -2864,10 +2478,7 @@ app.post('/chat', chatRateLimit, (req, res) => {
             const user = (!err && userRows.length) ? userRows[0] : null;
 
 
-
-
             const systemPrompt = buildSystemPrompt(user);
-
 
 
             const orderMatch   = message.match(/order\s*#?\s*(\d+)/i);
@@ -3003,7 +2614,6 @@ app.post('/chat', chatRateLimit, (req, res) => {
                     });
                     groqMessages.push({ role: 'assistant', content: 'Got it, I have the data.' });
                 }
-
 
 
                 safeHistory.forEach(h => {
@@ -3178,9 +2788,6 @@ app.get('/invoice', (req, res) => {
     if (!order) return res.redirect('/profile');
 
     const fs = require('fs');
-
-
-
 
 
     if (order.startsWith('..')) {
