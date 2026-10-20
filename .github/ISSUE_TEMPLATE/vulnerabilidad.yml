@@ -1,0 +1,101 @@
+name: "Vulnerabilidad (Fase 3 — Remediación)"
+description: "Issue por cada hallazgo PWN-XXX a remediar. Un issue por vulnerabilidad, cerrado por su propio PR."
+title: "[PWN-XXX] <nombre corto de la vulnerabilidad>"
+labels: ["seguridad", "fase-3"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Completar un issue por cada `PWN-XXX` asignado en la Matriz de Gobernanza.
+        Este issue se cierra con el PR que aplica el parche (usar `Closes #<issue>` en el PR).
+
+  - type: input
+    id: pwn_id
+    attributes:
+      label: ID interno (PWN-XXX)
+      placeholder: "PWN-014"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: modulo
+    attributes:
+      label: Módulo asignado
+      options:
+        - "Módulo 1: Autenticación"
+        - "Módulo 2: Gestión de Usuarios"
+        - "Módulo 3: Operaciones/Transacciones"
+        - "Módulo 4: Logs/Auditoría"
+    validations:
+      required: true
+
+  - type: input
+    id: responsable
+    attributes:
+      label: Estudiante responsable
+    validations:
+      required: true
+
+  - type: textarea
+    id: descripcion
+    attributes:
+      label: Descripción de la vulnerabilidad
+      description: Qué permite explotar, endpoint/parámetro afectado y referencia a la PoC correspondiente en el documento de Fase 2.
+      placeholder: |
+        Ej. SQL Injection de segundo orden en el visor de logs (/admin/security), parámetro de búsqueda `q`,
+        concatenado directamente en la consulta. Ver PoC: PWN-014 en Documento_PoCs_Consolidado.docx.
+    validations:
+      required: true
+
+  - type: input
+    id: owasp
+    attributes:
+      label: Categoría OWASP Top 10
+      placeholder: "A03:2021 – Injection"
+    validations:
+      required: true
+
+  - type: input
+    id: nist
+    attributes:
+      label: Subcategoría NIST CSF 2.0
+      placeholder: "PR.PS-06 / DE.CM-01"
+    validations:
+      required: true
+
+  - type: input
+    id: archivos
+    attributes:
+      label: Archivo(s) y línea(s) afectada(s)
+      placeholder: "src/routes/audit.routes.js:24"
+    validations:
+      required: true
+
+  - type: textarea
+    id: remediacion
+    attributes:
+      label: Remediación propuesta
+      description: Controles defensivos a implementar (hardening, sanitización, CSP, cookies seguras, menor privilegio, etc.)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: riesgo
+    attributes:
+      label: Riesgo residual esperado tras el parche
+      options:
+        - "Alto / Crítico (No Aceptable)"
+        - "Medio (Tolerable)"
+        - "Bajo (Aceptado)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist de cierre
+      options:
+        - label: PR vinculado con `Closes #<este issue>`
+        - label: PoC original re-ejecutada y confirmada como no explotable
+        - label: Reporte Técnico de Parches (sección 1-4) completado para este PWN-XXX
+        - label: Matriz de Riesgos NIST CSF actualizada con el riesgo residual
