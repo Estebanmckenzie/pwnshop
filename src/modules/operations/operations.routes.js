@@ -995,29 +995,46 @@ router.get('/admin/stats', requireAdmin, (req, res) => {
     });
 });
 
+const FORMULA_LEADERS = ['=', '+', '-', '@', '\t', '\r'];
+ 
+function sanitizeCsvField(value) {
+    let v = String(value == null ? '' : value);
+    if (FORMULA_LEADERS.includes(v.charAt(0))) {
+        v = "'" + v; // neutraliza la interpretación como fórmula en Excel/Sheets
+    }
+    return `"${v.replace(/"/g, '""')}"`;
+}
+ 
 router.get('/admin/export-orders', requireAdmin, (req, res) => {
     db.query(
         `SELECT o.id, u.username, u.email, o.total_amount, o.status, o.shipping_address, o.created_at
          FROM orders o JOIN users u ON o.user_id = u.id ORDER BY o.created_at DESC`,
         (err, orders) => {
             if (err) return res.send('Database error');
-
-
-            let csv = 'Order ID,Username,Email,Amount,Status,Shipping Address,Date\n';
+ 
+            let csv = [
+                sanitizeCsvField('Order ID'),
+                sanitizeCsvField('Username'),
+                sanitizeCsvField('Email'),
+                sanitizeCsvField('Amount'),
+                sanitizeCsvField('Status'),
+                sanitizeCsvField('Shipping Address'),
+                sanitizeCsvField('Date')
+            ].join(',') + '\n';
+ 
             orders.forEach(o => {
-
                 const row = [
-                    o.id,
-                    o.username,
-                    o.email,
-                    o.total_amount,
-                    o.status,
-                    `"${(o.shipping_address || '').replace(/"/g, '""')}"`,
-                    new Date(o.created_at).toISOString()
+                    sanitizeCsvField(o.id),
+                    sanitizeCsvField(o.username),
+                    sanitizeCsvField(o.email),
+                    sanitizeCsvField(o.total_amount),
+                    sanitizeCsvField(o.status),
+                    sanitizeCsvField(o.shipping_address),
+                    sanitizeCsvField(new Date(o.created_at).toISOString())
                 ].join(',');
                 csv += row + '\n';
             });
-
+ 
             res.setHeader('Content-Type', 'text/csv');
             res.setHeader('Content-Disposition', 'attachment; filename="pwnshop-orders.csv"');
             res.send(csv);
