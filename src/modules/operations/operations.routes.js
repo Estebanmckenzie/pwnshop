@@ -85,17 +85,18 @@ function getZoneFee(zone) {
 router.get('/order/:id', (req, res) => {
     if (!req.session.user) return res.redirect('/login');
     const orderId = req.params.id;
+    const userId = req.session.user.id;
     db.query(
-        'SELECT o.*, u.inbox_token FROM orders o LEFT JOIN users u ON o.user_id = u.id WHERE o.id = ?',
-        [orderId],
+        'SELECT o.* FROM orders o WHERE o.id = ? AND o.user_id = ?',
+        [orderId, userId],
         (err, orders) => {
-            if (err) return res.send('Database error');
-            if (!orders.length) return res.send('Order not found');
+            if (err) return res.status(500).send('Database error');
+            if (!orders.length) return res.status(404).send('Order not found');
             db.query(
                 'SELECT oi.*, p.name FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?',
                 [orderId],
                 (err, items) => {
-                    if (err) return res.send('Database error');
+                    if (err) return res.status(500).send('Database error');
                     res.render('order-details', { user: req.session.user, order: orders[0], items });
                 }
             );
