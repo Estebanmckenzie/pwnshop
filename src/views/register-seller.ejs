@@ -175,6 +175,21 @@
             line-height: 1.55;
         }
 
+        /* Request status notice */
+        .seller-notice {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 14px 16px;
+            margin-bottom: 24px;
+            border-radius: 10px;
+            background: var(--purple-pale);
+            border: 1.5px solid var(--purple-light);
+            color: var(--purple-deep);
+            font-size: 0.875rem;
+            line-height: 1.5;
+        }
+
         /* Confirm steps */
         .confirm-steps {
             display: flex;
@@ -305,32 +320,46 @@
 
     <div class="panel-right">
         <div class="badge-seller"><i class="bi bi-shop"></i> Seller Programme</div>
-        <h3>Confirm your seller registration</h3>
+        <h3>Request a seller account</h3>
         <p class="subtitle">
-            Activating your seller account is instant. Here's what happens next:
+            Seller accounts are reviewed by our team before activation. Here's how it works:
         </p>
+
+        <% const sellerNotice = typeof notice !== 'undefined' ? notice : null; %>
+        <% if (sellerNotice === 'sent') { %>
+            <div class="seller-notice"><i class="bi bi-send-check"></i>
+                <span>Your request has been sent. An administrator will review it and you will be notified once your seller account is active.</span></div>
+        <% } else if (sellerNotice === 'pending') { %>
+            <div class="seller-notice"><i class="bi bi-hourglass-split"></i>
+                <span>You already have a pending seller request. An administrator will review it soon.</span></div>
+        <% } else if (sellerNotice === 'already') { %>
+            <div class="seller-notice"><i class="bi bi-patch-check"></i>
+                <span>Your account already has seller access.</span></div>
+        <% } %>
 
         <div class="confirm-steps">
             <div class="step-item">
                 <div class="step-num">1</div>
-                <span>Your account role is upgraded to <strong>Seller</strong></span>
+                <span>You send a request to become a <strong>Seller</strong></span>
             </div>
             <div class="step-item">
                 <div class="step-num">2</div>
-                <span>You get access to <strong>Add Product</strong> from the navbar</span>
+                <span>An <strong>administrator</strong> reviews and approves it</span>
             </div>
             <div class="step-item">
                 <div class="step-num">3</div>
-                <span>Your storefront becomes visible on the <strong>Featured Sellers</strong> section</span>
+                <span>Once approved, you get <strong>Add Product</strong> and your storefront appears in <strong>Featured Sellers</strong></span>
             </div>
         </div>
 
+        <% if (!sellerNotice) { %>
         <form method="POST" action="/register-seller">
             <button type="submit" class="btn-confirm">
-                <i class="bi bi-check-circle-fill"></i>
-                Yes, Make Me a Seller
+                <i class="bi bi-send-fill"></i>
+                Request Seller Account
             </button>
         </form>
+        <% } %>
 
         <a href="/" class="btn-back">
             <i class="bi bi-arrow-left"></i> Back to Home
