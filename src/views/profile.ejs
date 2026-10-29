@@ -170,22 +170,15 @@
             <div class="profile-hero">
                 <div class="avatar-wrap">
                     <div class="avatar" id="avatarDisplay" title="Click to upload a new picture" style="cursor:pointer" onclick="document.getElementById('avatarFileInput').click()">
-                        <% if (user.avatar_url) {
-                               const isSvg = user.avatar_url.toLowerCase().endsWith('.svg'); %>
-                            <% if (isSvg) { %>
-                                <%# SVG rendered as <object> so its scripts/event-handlers execute (stored XSS) %>
-                                <object data="<%= user.avatar_url %>" type="image/svg+xml"
-                                        style="width:100%;height:100%;border-radius:50%;pointer-events:none;"
-                                        onerror="this.style.display='none'"></object>
-                            <% } else { %>
-                                <img src="<%= user.avatar_url %>" alt="Avatar" onerror="this.style.display='none'">
-                            <% } %>
+                        <% if (user.avatar_url) { %>
+                            <%# PWN-012: always <img> — an image loaded this way never runs scripts, even if it is an SVG %>
+                            <img src="<%= user.avatar_url %>" alt="Avatar" onerror="this.style.display='none'">
                         <% } else { %>
                             <%= user.username.charAt(0).toUpperCase() %>
                         <% } %>
                     </div>
                     <%# Hidden file input - triggered by clicking the avatar %>
-                    <input type="file" id="avatarFileInput" accept="image/*,.svg"
+                    <input type="file" id="avatarFileInput" accept="image/jpeg,image/png,image/gif,image/webp"
                            style="display:none" onchange="uploadAvatarFile(this)">
                 </div>
                 <div class="profile-name"><%= user.username %></div>
@@ -562,17 +555,14 @@ function showAvatarResult(ok, msg) {
 }
 
 function refreshAvatarDisplay(url) {
-    var ad     = document.getElementById('avatarDisplay');
-    var isSvg  = url.toLowerCase().endsWith('.svg');
-    if (isSvg) {
-        ad.innerHTML = '<object data="' + url + '" type="image/svg+xml" '
-            + 'style="width:100%;height:100%;border-radius:50%;pointer-events:none;" '
-            + 'onerror="this.style.display=\'none\'"></object>';
-    } else {
-        ad.innerHTML = '<img src="' + url + '" alt="Avatar" '
-            + 'onerror="this.style.display=\'none\'" '
-            + 'style="width:100%;height:100%;object-fit:cover;border-radius:50%;">';
-    }
+    // PWN-012: build the <img> with DOM APIs, never by concatenating the URL into HTML.
+    var ad  = document.getElementById('avatarDisplay');
+    var img = document.createElement('img');
+    img.src = url;
+    img.alt = 'Avatar';
+    img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%;';
+    img.addEventListener('error', function() { img.style.display = 'none'; });
+    ad.replaceChildren(img);
 }
 
 ordersInitPagination();

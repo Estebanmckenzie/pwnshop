@@ -6,6 +6,7 @@ const http = require('http');
 const https = require('https');
 const dns = require('dns');
 const net = require('net');
+const crypto = require('crypto');
 const { db } = require('../../shared/db');
 const { auditLog } = require('../../shared/audit-core');
 const { VULNBANK_LAB_VULN } = require('../../shared/config');
@@ -14,15 +15,26 @@ const { avatarLimiter, registerSellerLimiter, accountDeleteLimiter, mailReadLimi
 const { requireAdmin } = require('../../shared/helpers');
 const router = express.Router();
 
-const ALLOWED_AVATAR_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
-const ALLOWED_AVATAR_EXTS  = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
+// PWN-012 (stored XSS): SVG can carry scripts, so only raster formats are accepted.
+const ALLOWED_AVATAR_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+const ALLOWED_AVATAR_EXTS  = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+
+// Detects the real image type from the file's first bytes (magic numbers).
+function detectImageType(buffer) {
+    if (buffer.length >= 3 && buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return 'jpg';
+    if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'png';
+    const head = buffer.subarray(0, 12).toString('latin1');
+    if (head.startsWith('GIF87a') || head.startsWith('GIF89a')) return 'gif';
+    if (head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP') return 'webp';
+    return null;
+}
 
 const avatarStorage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'public/uploads/'),
     filename: (req, file, cb) => {
-
-        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-        cb(null, 'avatar_' + Date.now() + '_' + safe);
+        // The stored name never reuses the client's file name, only a validated extension.
+        const ext = file.originalname.split('.').pop().toLowerCase();
+        cb(null, 'avatar_' + Date.now() + '_' + crypto.randomBytes(6).toString('hex') + '.' + ext);
     }
 });
 
@@ -31,11 +43,8 @@ const avatarUpload = multer({
     limits: { fileSize: 2 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const ext = file.originalname.split('.').pop().toLowerCase();
-
-
-
         if (!ALLOWED_AVATAR_MIMES.includes(file.mimetype) || !ALLOWED_AVATAR_EXTS.includes(ext)) {
-            return cb(new Error('Only image files are allowed (jpg, png, gif, webp, svg)'));
+            return cb(new Error('Only image files are allowed (jpg, png, gif, webp)'));
         }
         cb(null, true);
     }
@@ -203,17 +212,19 @@ router.post('/profile/upload-avatar', avatarLimiter, (req, res) => {
         const ext     = req.file.originalname.split('.').pop().toLowerCase();
         const fileUrl = '/uploads/' + req.file.filename;
 
-
-
-
-
-        if (ext === 'svg') {
-            try {
-                let svg = fs.readFileSync(req.file.path, 'utf8');
-                svg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-                svg = svg.replace(/javascript:/gi, '');
-                fs.writeFileSync(req.file.path, svg);
-            } catch (_) {  }
+        // Extension and MIME type come from the client; the content must really be that image.
+        let detected = null;
+        try {
+            const fd = fs.openSync(req.file.path, 'r');
+            const header = Buffer.alloc(12);
+            const bytesRead = fs.readSync(fd, header, 0, 12, 0);
+            fs.closeSync(fd);
+            detected = detectImageType(header.subarray(0, bytesRead));
+        } catch (_) { }
+        const expected = ext === 'jpeg' ? 'jpg' : ext;
+        if (detected !== expected) {
+            fs.unlink(req.file.path, () => {});
+            return res.json({ ok: false, error: 'File content is not a valid ' + ext + ' image' });
         }
 
 
