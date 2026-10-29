@@ -305,7 +305,7 @@ function toggleMail(id, row) {
             const dot = row.querySelector('.unread-dot');
             if (dot) { dot.className = 'read-dot'; }
 
-            fetch('/mail/' + id + '/read', { method: 'POST' });
+            fetch('/mail/' + id + '/read', { method: 'POST', headers: { 'X-CSRF-Token': '<%= csrfToken %>' } });
 
 
             const badge = document.querySelector('.unread-badge');

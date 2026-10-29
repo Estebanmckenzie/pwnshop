@@ -225,6 +225,7 @@
                     <p style="font-size:0.72rem;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:6px;padding:5px 8px;margin-bottom:6px;"><i class="bi bi-exclamation-triangle-fill"></i> <%= addressError %></p>
                 <% } %>
                 <form action="/profile/address" method="POST">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
                     <textarea class="avatar-url-input" name="default_shipping_address" rows="2"
                         style="width:100%;resize:none;margin-bottom:5px;font-size:0.78rem;"
                         placeholder="Street, City, State, Postal Code"><%= user.default_shipping_address || '' %></textarea>
@@ -260,9 +261,15 @@
                     <a href="/mail" class="btn-action btn-action-outline" style="justify-content:center;"><i class="bi bi-envelope"></i> Inbox</a>
                     <a href="/vulnerabilities" class="btn-action btn-action-outline" style="justify-content:center;"><i class="bi bi-bug"></i> Vulns</a>
                 </div>
-                <form method="POST" action="/account/delete" id="deleteAccountForm">
-                    <button type="button" class="btn-action btn-action-danger" style="width:100%"
-                            onclick="if(confirm('Permanently delete your account? This cannot be undone.')) document.getElementById('deleteAccountForm').submit()">
+                <% if (deleteError) { %>
+                    <p style="font-size:0.72rem;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:6px;padding:5px 8px;margin:0;"><i class="bi bi-exclamation-triangle-fill"></i> <%= deleteError %></p>
+                <% } %>
+                <form method="POST" action="/account/delete" id="deleteAccountForm"
+                      onsubmit="return confirm('Permanently delete your account? This cannot be undone.')">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+                    <input type="password" name="password" class="avatar-url-input" required autocomplete="current-password"
+                           placeholder="Confirm your password to delete" style="width:100%;margin-bottom:6px;font-size:0.78rem;">
+                    <button type="submit" class="btn-action btn-action-danger" style="width:100%">
                         <i class="bi bi-trash3"></i> Delete Account
                     </button>
                 </form>
@@ -441,6 +448,9 @@
 </div>
 
 <script>
+// PWN-026: anti-CSRF token for this session, sent on every state-changing request.
+var CSRF_TOKEN = '<%= csrfToken %>';
+
 function openFundWalletModal() {
     document.getElementById('fundWalletModal').classList.add('open');
 }
@@ -576,7 +586,7 @@ document.getElementById('setAvatarBtn').addEventListener('click', function() {
 
     fetch('/profile/update-avatar', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
         body:    JSON.stringify({ avatar_url: url })
     })
     .then(function(r) { return r.json(); })
@@ -604,8 +614,9 @@ function uploadAvatarFile(input) {
     document.getElementById('avatarResult').className     = 'avatar-result';
 
     fetch('/profile/upload-avatar', {
-        method: 'POST',
-        body:   formData
+        method:  'POST',
+        headers: { 'X-CSRF-Token': CSRF_TOKEN },
+        body:    formData
     })
     .then(function(r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
