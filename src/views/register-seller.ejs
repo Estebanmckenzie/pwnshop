@@ -354,6 +354,7 @@
 
         <% if (!sellerNotice) { %>
         <form method="POST" action="/register-seller">
+            <input type="hidden" name="_csrf" value="<%= csrfToken %>">
             <button type="submit" class="btn-confirm">
                 <i class="bi bi-send-fill"></i>
                 Request Seller Account

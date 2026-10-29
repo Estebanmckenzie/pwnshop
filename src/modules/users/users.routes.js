@@ -13,7 +13,49 @@ const { VULNBANK_LAB_VULN } = require('../../shared/config');
 const { isVulnbankConfigured } = require('../../shared/vulnbank');
 const { avatarLimiter, registerSellerLimiter, accountDeleteLimiter, mailReadLimiter } = require('../../shared/rate-limiters');
 const { requireAdmin } = require('../../shared/helpers');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
+
+// PWN-026 (CSRF): per-session synchronizer token + same-origin check on every M2 POST.
+function csrfToken(req) {
+    if (!req.session.csrfToken) req.session.csrfToken = crypto.randomBytes(32).toString('hex');
+    return req.session.csrfToken;
+}
+
+// Browsers send Origin (or at least Referer) on cross-site POSTs; when present it must be this host.
+function isSameOrigin(req) {
+    const source = req.get('origin') || req.get('referer');
+    if (!source) return true;
+    try {
+        return new URL(source).host === req.get('host');
+    } catch (_) {
+        return false;
+    }
+}
+
+function rejectCsrf(req, res) {
+    if (req.get('x-csrf-token') !== undefined || req.is('json') || req.is('multipart/form-data')) {
+        return res.status(403).json({ ok: false, error: 'Invalid or missing CSRF token. Reload the page and try again.' });
+    }
+    res.status(403).send('Invalid or missing CSRF token. Reload the page and try again.');
+}
+
+function verifyCsrf(req, res, next) {
+    if (!isSameOrigin(req)) return rejectCsrf(req, res);
+    const sent     = String(req.get('x-csrf-token') || (req.body && req.body._csrf) || '');
+    const expected = String(req.session.csrfToken || '');
+    if (!expected || sent.length !== expected.length ||
+        !crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(expected))) {
+        return rejectCsrf(req, res);
+    }
+    next();
+}
+
+// Admin forms live in the shared admin.ejs view, so these routes rely on the origin check.
+function verifySameOrigin(req, res, next) {
+    if (!isSameOrigin(req)) return rejectCsrf(req, res);
+    next();
+}
 
 // PWN-012 (stored XSS): SVG can carry scripts, so only raster formats are accepted.
 const ALLOWED_AVATAR_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
@@ -75,8 +117,10 @@ router.get('/profile', (req, res) => {
                         walletSuccess:  req.query.wallet_success  || null,
                         addressSuccess: req.query.address_success || null,
                         addressError:   req.query.address_error   || null,
+                        deleteError:    req.query.delete_error    || null,
                         vulnbankEnabled: isVulnbankConfigured(),
-                        vulnbankLabVuln: VULNBANK_LAB_VULN
+                        vulnbankLabVuln: VULNBANK_LAB_VULN,
+                        csrfToken:      csrfToken(req)
                     });
                 }
             );
@@ -84,7 +128,7 @@ router.get('/profile', (req, res) => {
     });
 });
 
-router.post('/profile/address', (req, res) => {
+router.post('/profile/address', verifyCsrf, (req, res) => {
     if (!req.session.user) return res.redirect('/login');
     const userId  = req.session.user.id;
     const address = String(req.body.default_shipping_address || '').trim();
@@ -132,7 +176,7 @@ function safeLookup(hostname, options, callback) {
     });
 }
 
-router.post('/profile/update-avatar', avatarLimiter, (req, res) => {
+router.post('/profile/update-avatar', avatarLimiter, verifyCsrf, (req, res) => {
     if (!req.session.user) return res.status(401).json({ ok: false, error: 'Not logged in' });
     const { avatar_url } = req.body;
     if (!avatar_url || typeof avatar_url !== 'string') return res.status(400).json({ ok: false, error: 'No URL provided' });
@@ -201,7 +245,7 @@ router.post('/profile/update-avatar', avatarLimiter, (req, res) => {
     });
 });
 
-router.post('/profile/upload-avatar', avatarLimiter, (req, res) => {
+router.post('/profile/upload-avatar', avatarLimiter, verifyCsrf, (req, res) => {
     if (!req.session.user) return res.status(401).json({ ok: false, error: 'Not logged in' });
 
     avatarUpload.single('avatar')(req, res, (uploadErr) => {
@@ -248,15 +292,24 @@ router.post('/profile/upload-avatar', avatarLimiter, (req, res) => {
     });
 });
 
-router.post('/account/delete', accountDeleteLimiter, (req, res) => {
+router.post('/account/delete', accountDeleteLimiter, verifyCsrf, (req, res) => {
     if (!req.session.user) return res.redirect('/login');
     const userId = req.session.user.id;
+    const password = String(req.body.password || '');
+    if (!password) return res.redirect('/profile?delete_error=' + encodeURIComponent('Enter your password to delete your account'));
 
+    // Destructive action: re-authenticate with the current password before deleting.
+    db.query('SELECT password FROM users WHERE id = ?', [userId], (err, rows) => {
+        if (err || !rows.length) return res.redirect('/profile?delete_error=' + encodeURIComponent('Could not verify your password'));
+        bcrypt.compare(password, rows[0].password, (bcryptErr, match) => {
+            if (bcryptErr || !match) return res.redirect('/profile?delete_error=' + encodeURIComponent('Incorrect password'));
 
-    db.query('DELETE FROM users WHERE id = ?', [userId], (err) => {
-        if (err) return res.send('Error deleting account: ' + err.message);
-        auditLog(userId, 'ACCOUNT_DELETED', `username: ${req.session.user.username}`, req);
-        req.session.destroy(() => res.redirect('/'));
+            db.query('DELETE FROM users WHERE id = ?', [userId], (err) => {
+                if (err) return res.send('Error deleting account: ' + err.message);
+                auditLog(userId, 'ACCOUNT_DELETED', `username: ${req.session.user.username}`, req);
+                req.session.destroy(() => res.redirect('/'));
+            });
+        });
     });
 });
 
@@ -302,14 +355,15 @@ router.get('/mail/:token', (req, res) => {
                     mails,
                     mailOwner: owner,
                     userId,
-                    unread
+                    unread,
+                    csrfToken: csrfToken(req)
                 });
             }
         );
     });
 });
 
-router.post('/mail/:id/read', mailReadLimiter, (req, res) => {
+router.post('/mail/:id/read', mailReadLimiter, verifyCsrf, (req, res) => {
     const ownerId = req.session.user?.id || req.session.pendingUserId;
     if (!ownerId) return res.status(401).json({ ok: false });
 
@@ -348,17 +402,17 @@ router.get('/register-seller', (req, res) => {
     if (!req.session.user) return res.redirect('/login');
     sellerRequestState(req.session.user.id, (err, notice) => {
         if (err) return res.status(500).send('Error');
-        res.render('register-seller', { user: req.session.user, notice });
+        res.render('register-seller', { user: req.session.user, notice, csrfToken: csrfToken(req) });
     });
 });
 
-router.post('/register-seller', registerSellerLimiter, (req, res) => {
+router.post('/register-seller', registerSellerLimiter, verifyCsrf, (req, res) => {
     if (!req.session.user) return res.redirect('/login');
     const user = req.session.user;
 
     sellerRequestState(user.id, (err, notice) => {
         if (err) return res.status(500).send('Error');
-        if (notice) return res.render('register-seller', { user, notice });
+        if (notice) return res.render('register-seller', { user, notice, csrfToken: csrfToken(req) });
 
         db.query(
             "INSERT INTO mail_inbox (to_user_id, to_email, subject, body) SELECT id, email, ?, ? FROM users WHERE role = 'admin'",
@@ -370,7 +424,7 @@ router.post('/register-seller', registerSellerLimiter, (req, res) => {
             (err) => {
                 if (err) return res.status(500).send('Error');
                 auditLog(user.id, 'SELLER_REQUESTED', `username: ${user.username}`, req);
-                res.render('register-seller', { user, notice: 'sent' });
+                res.render('register-seller', { user, notice: 'sent', csrfToken: csrfToken(req) });
             }
         );
     });
@@ -392,7 +446,7 @@ router.get('/admin/users', requireAdmin, (req, res) => {
     });
 });
 
-router.post('/admin/make-seller', requireAdmin, (req, res) => {
+router.post('/admin/make-seller', requireAdmin, verifySameOrigin, (req, res) => {
     db.query('UPDATE users SET isSeller = TRUE, role = "seller" WHERE email = ?', [req.body.email], (err, r) => {
         if (err || !r.affectedRows) return res.redirect('/admin/users?error=' + (err ? 'Database error' : 'Email not found'));
         auditLog(req.session.user.id, 'SELLER_PROMOTED',
@@ -401,7 +455,7 @@ router.post('/admin/make-seller', requireAdmin, (req, res) => {
     });
 });
 
-router.post('/admin/remove-seller', requireAdmin, (req, res) => {
+router.post('/admin/remove-seller', requireAdmin, verifySameOrigin, (req, res) => {
     db.query('UPDATE users SET isSeller = FALSE, role = "user" WHERE id = ?', [req.body.user_id], (err) => {
         if (err) return res.redirect('/admin/users?error=Database error');
         auditLog(req.session.user.id, 'SELLER_DEMOTED',
@@ -410,7 +464,7 @@ router.post('/admin/remove-seller', requireAdmin, (req, res) => {
     });
 });
 
-router.post('/admin/delete-user', requireAdmin, (req, res) => {
+router.post('/admin/delete-user', requireAdmin, verifySameOrigin, (req, res) => {
     const targetId = parseInt(req.body.user_id);
     if (targetId === req.session.user.id) return res.redirect('/admin/users?error=Cannot delete your own account');
 
