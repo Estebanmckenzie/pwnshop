@@ -313,18 +313,55 @@ router.post('/mail/:id/read', mailReadLimiter, (req, res) => {
     });
 });
 
+// USR-03 (privilege escalation): a user can only *request* the seller role.
+// The role is granted by an admin through /admin/make-seller.
+const sellerRequestSubject = (userId) => `Seller request: user #${userId}`;
+
+// Returns 'already' (seller/admin), 'pending' (unread request in an admin inbox) or null.
+function sellerRequestState(userId, callback) {
+    db.query('SELECT role, isSeller FROM users WHERE id = ?', [userId], (err, rows) => {
+        if (err || !rows.length) return callback(err || new Error('User not found'));
+        if (rows[0].isSeller || rows[0].role === 'seller' || rows[0].role === 'admin') return callback(null, 'already');
+        db.query(
+            'SELECT id FROM mail_inbox WHERE subject = ? AND is_read = FALSE LIMIT 1',
+            [sellerRequestSubject(userId)],
+            (err, pending) => {
+                if (err) return callback(err);
+                callback(null, pending.length ? 'pending' : null);
+            }
+        );
+    });
+}
+
 router.get('/register-seller', (req, res) => {
     if (!req.session.user) return res.redirect('/login');
-    res.render('register-seller', { user: req.session.user });
+    sellerRequestState(req.session.user.id, (err, notice) => {
+        if (err) return res.status(500).send('Error');
+        res.render('register-seller', { user: req.session.user, notice });
+    });
 });
 
 router.post('/register-seller', registerSellerLimiter, (req, res) => {
     if (!req.session.user) return res.redirect('/login');
-    db.query('UPDATE users SET isSeller = TRUE WHERE id = ?', [req.session.user.id], (err) => {
+    const user = req.session.user;
+
+    sellerRequestState(user.id, (err, notice) => {
         if (err) return res.status(500).send('Error');
-        req.session.user.isSeller = true;
-        req.session.user.role = 'seller';
-        res.redirect('/');
+        if (notice) return res.render('register-seller', { user, notice });
+
+        db.query(
+            "INSERT INTO mail_inbox (to_user_id, to_email, subject, body) SELECT id, email, ?, ? FROM users WHERE role = 'admin'",
+            [
+                sellerRequestSubject(user.id),
+                `User ${user.username} (${user.email}) has requested a seller account.\n\n` +
+                `To approve it, go to /admin/users and promote ${user.email} with "Make Seller".\n\n- Pwnshop`
+            ],
+            (err) => {
+                if (err) return res.status(500).send('Error');
+                auditLog(user.id, 'SELLER_REQUESTED', `username: ${user.username}`, req);
+                res.render('register-seller', { user, notice: 'sent' });
+            }
+        );
     });
 });
 
