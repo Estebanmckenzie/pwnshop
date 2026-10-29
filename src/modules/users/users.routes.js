@@ -34,6 +34,8 @@ function isSameOrigin(req) {
 }
 
 function rejectCsrf(req, res) {
+    auditUserEvent(req.session.user?.id || null, 'CSRF_REJECTED',
+        { method: req.method, path: req.originalUrl, origin: req.get('origin') || req.get('referer') || 'none' }, req);
     if (req.get('x-csrf-token') !== undefined || req.is('json') || req.is('multipart/form-data')) {
         return res.status(403).json({ ok: false, error: 'Invalid or missing CSRF token. Reload the page and try again.' });
     }
@@ -55,6 +57,34 @@ function verifyCsrf(req, res, next) {
 function verifySameOrigin(req, res, next) {
     if (!isSameOrigin(req)) return rejectCsrf(req, res);
     next();
+}
+
+// USR-06 (audit poisoning): M2 never hands raw user input to auditLog().
+// Values are stripped of control characters / line breaks, length-capped and stored as
+// separate JSON fields, plus defensive tracing data taken from the server side.
+const LOG_VALUE_MAX = 200;
+
+// Control characters (C0, DEL, C1) and the Unicode line/paragraph separators (0x2028, 0x2029).
+function isLogControlChar(code) {
+    return code < 0x20 || (code >= 0x7F && code <= 0x9F) || code === 0x2028 || code === 0x2029;
+}
+
+function cleanLogValue(value) {
+    const text = String(value === undefined || value === null ? '' : value);
+    let clean = '';
+    for (const char of text) clean += isLogControlChar(char.charCodeAt(0)) ? ' ' : char;
+    return clean.slice(0, LOG_VALUE_MAX);
+}
+
+function auditUserEvent(userId, action, fields, req) {
+    const detail = { trace: crypto.randomUUID() };
+    Object.keys(fields).forEach((key) => { detail[key] = cleanLogValue(fields[key]); });
+    // Who and from where, according to the server — not to the request body or headers.
+    detail.actor = req.session.user?.id || req.session.pendingUserId || null;
+    detail.peer  = cleanLogValue(req.socket && req.socket.remoteAddress);
+    // The spoofable header is kept apart, so a forged IP shows up as a mismatch with `peer`.
+    if (req.get('x-forwarded-for')) detail.claimed_xff = cleanLogValue(req.get('x-forwarded-for'));
+    auditLog(userId, action, JSON.stringify(detail), req);
 }
 
 // PWN-012 (stored XSS): SVG can carry scripts, so only raster formats are accepted.
@@ -181,29 +211,35 @@ router.post('/profile/update-avatar', avatarLimiter, verifyCsrf, (req, res) => {
     const { avatar_url } = req.body;
     if (!avatar_url || typeof avatar_url !== 'string') return res.status(400).json({ ok: false, error: 'No URL provided' });
 
-    let target;
-    try {
-        target = new URL(avatar_url);
-    } catch (_) {
-        return res.status(400).json({ ok: false, error: 'Invalid URL' });
-    }
-    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) {
-        return res.status(400).json({ ok: false, error: 'Only http/https image URLs are allowed' });
-    }
-    if (target.port && !['80', '443'].includes(target.port)) {
-        return res.status(400).json({ ok: false, error: 'Only default ports are allowed' });
-    }
-    const host = target.hostname.replace(/^\[|\]$/g, '');
-    if (net.isIP(host) && isBlockedAddress(host)) {
-        return res.status(400).json({ ok: false, error: 'URL not allowed' });
-    }
-
     let answered = false;
     const reply = (status, body) => {
         if (answered) return;
         answered = true;
         res.status(status).json(body);
     };
+    // USR-06: rejected URLs are recorded (with the internal reason) so SSRF attempts are detectable.
+    const rejectUrl = (error, internalReason) => {
+        if (answered) return;
+        auditUserEvent(req.session.user.id, 'AVATAR_URL_REJECTED', { url: avatar_url, reason: internalReason || error }, req);
+        reply(400, { ok: false, error });
+    };
+
+    let target;
+    try {
+        target = new URL(avatar_url);
+    } catch (_) {
+        return rejectUrl('Invalid URL');
+    }
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) {
+        return rejectUrl('Only http/https image URLs are allowed');
+    }
+    if (target.port && !['80', '443'].includes(target.port)) {
+        return rejectUrl('Only default ports are allowed');
+    }
+    const host = target.hostname.replace(/^\[|\]$/g, '');
+    if (net.isIP(host) && isBlockedAddress(host)) {
+        return rejectUrl('URL not allowed', 'Blocked destination');
+    }
 
     const proto = target.protocol === 'https:' ? https : http;
 
@@ -212,7 +248,7 @@ router.post('/profile/update-avatar', avatarLimiter, verifyCsrf, (req, res) => {
         response.resume();
         if (response.statusCode !== 200 || !contentType.startsWith('image/')) {
             request.destroy();
-            return reply(400, { ok: false, error: 'URL does not point to an image' });
+            return rejectUrl('URL does not point to an image', `status ${response.statusCode}, type ${contentType || 'none'}`);
         }
 
         db.query(
@@ -227,7 +263,7 @@ router.post('/profile/update-avatar', avatarLimiter, verifyCsrf, (req, res) => {
                             if (!err && users.length) req.session.user = users[0];
                         });
 
-                        auditLog(req.session.user.id, 'AVATAR_URL_SET', `url: ${avatar_url}`, req);
+                        auditUserEvent(req.session.user.id, 'AVATAR_URL_SET', { url: avatar_url }, req);
                         reply(200, { ok: true, url: avatar_url });
                     }
                 );
@@ -235,13 +271,13 @@ router.post('/profile/update-avatar', avatarLimiter, verifyCsrf, (req, res) => {
         );
     });
 
-    request.on('error', () => {
-        reply(400, { ok: false, error: 'Could not fetch image from that URL' });
+    request.on('error', (err) => {
+        rejectUrl('Could not fetch image from that URL', err.message);
     });
 
     request.setTimeout(5000, () => {
+        rejectUrl('Request timed out');
         request.destroy();
-        reply(400, { ok: false, error: 'Request timed out' });
     });
 });
 
@@ -249,7 +285,10 @@ router.post('/profile/upload-avatar', avatarLimiter, verifyCsrf, (req, res) => {
     if (!req.session.user) return res.status(401).json({ ok: false, error: 'Not logged in' });
 
     avatarUpload.single('avatar')(req, res, (uploadErr) => {
-        if (uploadErr) return res.json({ ok: false, error: uploadErr.message });
+        if (uploadErr) {
+            auditUserEvent(req.session.user.id, 'AVATAR_UPLOAD_REJECTED', { reason: uploadErr.message }, req);
+            return res.json({ ok: false, error: uploadErr.message });
+        }
         if (!req.file)  return res.json({ ok: false, error: 'No file received' });
 
         const fs      = require('fs');
@@ -268,6 +307,10 @@ router.post('/profile/upload-avatar', avatarLimiter, verifyCsrf, (req, res) => {
         const expected = ext === 'jpeg' ? 'jpg' : ext;
         if (detected !== expected) {
             fs.unlink(req.file.path, () => {});
+            auditUserEvent(req.session.user.id, 'AVATAR_UPLOAD_REJECTED', {
+                reason: 'content does not match extension', file: req.file.originalname,
+                mime: req.file.mimetype, detected: detected || 'unknown'
+            }, req);
             return res.json({ ok: false, error: 'File content is not a valid ' + ext + ' image' });
         }
 
@@ -283,7 +326,8 @@ router.post('/profile/upload-avatar', avatarLimiter, verifyCsrf, (req, res) => {
                         db.query('SELECT * FROM users WHERE id = ?', [req.session.user.id], (e2, users) => {
                             if (!e2 && users.length) req.session.user = users[0];
                         });
-                        auditLog(req.session.user.id, 'AVATAR_UPLOADED', `file: ${req.file.originalname} | stored: ${req.file.filename} | mime: ${req.file.mimetype}`, req);
+                        auditUserEvent(req.session.user.id, 'AVATAR_UPLOADED',
+                            { file: req.file.originalname, stored: req.file.filename, mime: req.file.mimetype }, req);
                         res.json({ ok: true, url: fileUrl });
                     }
                 );
@@ -302,11 +346,14 @@ router.post('/account/delete', accountDeleteLimiter, verifyCsrf, (req, res) => {
     db.query('SELECT password FROM users WHERE id = ?', [userId], (err, rows) => {
         if (err || !rows.length) return res.redirect('/profile?delete_error=' + encodeURIComponent('Could not verify your password'));
         bcrypt.compare(password, rows[0].password, (bcryptErr, match) => {
-            if (bcryptErr || !match) return res.redirect('/profile?delete_error=' + encodeURIComponent('Incorrect password'));
+            if (bcryptErr || !match) {
+                auditUserEvent(userId, 'ACCOUNT_DELETE_DENIED', { reason: 'incorrect password' }, req);
+                return res.redirect('/profile?delete_error=' + encodeURIComponent('Incorrect password'));
+            }
 
             db.query('DELETE FROM users WHERE id = ?', [userId], (err) => {
                 if (err) return res.send('Error deleting account: ' + err.message);
-                auditLog(userId, 'ACCOUNT_DELETED', `username: ${req.session.user.username}`, req);
+                auditUserEvent(userId, 'ACCOUNT_DELETED', { username: req.session.user.username }, req);
                 req.session.destroy(() => res.redirect('/'));
             });
         });
@@ -423,7 +470,7 @@ router.post('/register-seller', registerSellerLimiter, verifyCsrf, (req, res) =>
             ],
             (err) => {
                 if (err) return res.status(500).send('Error');
-                auditLog(user.id, 'SELLER_REQUESTED', `username: ${user.username}`, req);
+                auditUserEvent(user.id, 'SELLER_REQUESTED', { username: user.username }, req);
                 res.render('register-seller', { user, notice: 'sent', csrfToken: csrfToken(req) });
             }
         );
@@ -449,8 +496,8 @@ router.get('/admin/users', requireAdmin, (req, res) => {
 router.post('/admin/make-seller', requireAdmin, verifySameOrigin, (req, res) => {
     db.query('UPDATE users SET isSeller = TRUE, role = "seller" WHERE email = ?', [req.body.email], (err, r) => {
         if (err || !r.affectedRows) return res.redirect('/admin/users?error=' + (err ? 'Database error' : 'Email not found'));
-        auditLog(req.session.user.id, 'SELLER_PROMOTED',
-            `admin: ${req.session.user.username} | email: ${req.body.email}`, req);
+        auditUserEvent(req.session.user.id, 'SELLER_PROMOTED',
+            { admin: req.session.user.username, email: req.body.email }, req);
         res.redirect('/admin/users?success=User promoted to seller');
     });
 });
@@ -458,8 +505,8 @@ router.post('/admin/make-seller', requireAdmin, verifySameOrigin, (req, res) => 
 router.post('/admin/remove-seller', requireAdmin, verifySameOrigin, (req, res) => {
     db.query('UPDATE users SET isSeller = FALSE, role = "user" WHERE id = ?', [req.body.user_id], (err) => {
         if (err) return res.redirect('/admin/users?error=Database error');
-        auditLog(req.session.user.id, 'SELLER_DEMOTED',
-            `admin: ${req.session.user.username} | user_id: ${req.body.user_id}`, req);
+        auditUserEvent(req.session.user.id, 'SELLER_DEMOTED',
+            { admin: req.session.user.username, user_id: req.body.user_id }, req);
         res.redirect('/admin/users?success=Seller role removed');
     });
 });
@@ -489,8 +536,8 @@ router.post('/admin/delete-user', requireAdmin, verifySameOrigin, (req, res) => 
     function runNext(err) {
         if (err) return res.redirect('/admin/users?error=' + encodeURIComponent('Delete failed: ' + err.message));
         if (i >= steps.length) {
-            auditLog(req.session.user.id, 'USER_DELETED',
-                `admin: ${req.session.user.username} | deleted_user_id: ${targetId}`, req);
+            auditUserEvent(req.session.user.id, 'USER_DELETED',
+                { admin: req.session.user.username, deleted_user_id: targetId }, req);
             return res.redirect('/admin/users?success=User and all related data deleted');
         }
         db.query(steps[i++], runNext);
