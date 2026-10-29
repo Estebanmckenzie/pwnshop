@@ -207,10 +207,9 @@ router.get('/mail/:token', (req, res) => {
 
 
 
-    const loggedInId  = req.session.user?.id;
-    const pendingId   = req.session.pendingUserId;
-    const resetMailId = req.session.resetMailUserId;
-
+    const loggedInId = req.session.user?.id;
+    const pendingId  = req.session.pendingUserId;
+    if (!loggedInId && !pendingId) return res.redirect('/login');
 
     db.query('SELECT id, username, email, inbox_token FROM users WHERE inbox_token = ?', [token], (err, users) => {
         if (err) return res.send('Database error');
@@ -219,9 +218,10 @@ router.get('/mail/:token', (req, res) => {
         const owner  = users[0];
         const userId = owner.id;
 
-
-        if (!loggedInId && userId !== pendingId && userId !== resetMailId)
-            return res.redirect('/login');
+        // PWN-004 (IDOR): only the mailbox owner may read it — the logged-in user,
+        // or the user who already passed the password step and is waiting for the OTP.
+        const isOwner = loggedInId ? userId === loggedInId : userId === pendingId;
+        if (!isOwner) return res.status(404).render('404', { user: req.session.user });
 
         db.query(
             'SELECT * FROM mail_inbox WHERE to_user_id = ? ORDER BY created_at DESC',
@@ -242,9 +242,18 @@ router.get('/mail/:token', (req, res) => {
 });
 
 router.post('/mail/:id/read', mailReadLimiter, (req, res) => {
-    if (!req.session.user && !req.session.pendingUserId) return res.status(401).json({ ok: false });
-    db.query('UPDATE mail_inbox SET is_read = TRUE WHERE id = ?', [req.params.id]);
-    res.json({ ok: true });
+    const ownerId = req.session.user?.id || req.session.pendingUserId;
+    if (!ownerId) return res.status(401).json({ ok: false });
+
+    const mailId = Number(req.params.id);
+    if (!Number.isInteger(mailId) || mailId <= 0) return res.status(400).json({ ok: false });
+
+    // PWN-004 (IDOR): the UPDATE only touches mail addressed to the session's user.
+    db.query('UPDATE mail_inbox SET is_read = TRUE WHERE id = ? AND to_user_id = ?', [mailId, ownerId], (err, result) => {
+        if (err) return res.status(500).json({ ok: false });
+        if (!result.affectedRows) return res.status(404).json({ ok: false });
+        res.json({ ok: true });
+    });
 });
 
 router.get('/register-seller', (req, res) => {
