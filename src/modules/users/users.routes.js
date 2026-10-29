@@ -4,6 +4,8 @@ const express = require('express');
 const multer = require('multer');
 const http = require('http');
 const https = require('https');
+const dns = require('dns');
+const net = require('net');
 const { db } = require('../../shared/db');
 const { auditLog } = require('../../shared/audit-core');
 const { VULNBANK_LAB_VULN } = require('../../shared/config');
@@ -91,47 +93,102 @@ router.post('/profile/address', (req, res) => {
     );
 });
 
+// PWN-029 (SSRF): only public destinations may be fetched for an avatar URL.
+// BlockList also matches IPv4-mapped IPv6 forms such as ::ffff:7f00:1.
+const blockedNetworks = new net.BlockList();
+[
+    ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+    ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16],
+    ['198.18.0.0', 15], ['224.0.0.0', 4], ['240.0.0.0', 4]
+].forEach(([base, bits]) => blockedNetworks.addSubnet(base, bits, 'ipv4'));
+[
+    ['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]
+].forEach(([base, bits]) => blockedNetworks.addSubnet(base, bits, 'ipv6'));
+
+function isBlockedAddress(ip) {
+    const family = net.isIP(ip);
+    if (!family) return true;
+    return blockedNetworks.check(ip, family === 4 ? 'ipv4' : 'ipv6');
+}
+
+// Checks the address actually used for the connection, so DNS rebinding cannot swap it.
+function safeLookup(hostname, options, callback) {
+    dns.lookup(hostname, options, (err, address, family) => {
+        if (err) return callback(err);
+        const list = Array.isArray(address) ? address : [{ address, family }];
+        if (list.some(entry => isBlockedAddress(entry.address))) {
+            return callback(new Error('Blocked destination'));
+        }
+        callback(null, address, family);
+    });
+}
+
 router.post('/profile/update-avatar', avatarLimiter, (req, res) => {
     if (!req.session.user) return res.status(401).json({ ok: false, error: 'Not logged in' });
     const { avatar_url } = req.body;
-    if (!avatar_url) return res.status(400).json({ ok: false, error: 'No URL provided' });
+    if (!avatar_url || typeof avatar_url !== 'string') return res.status(400).json({ ok: false, error: 'No URL provided' });
 
-    const proto = avatar_url.startsWith('https') ? https : http;
+    let target;
+    try {
+        target = new URL(avatar_url);
+    } catch (_) {
+        return res.status(400).json({ ok: false, error: 'Invalid URL' });
+    }
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) {
+        return res.status(400).json({ ok: false, error: 'Only http/https image URLs are allowed' });
+    }
+    if (target.port && !['80', '443'].includes(target.port)) {
+        return res.status(400).json({ ok: false, error: 'Only default ports are allowed' });
+    }
+    const host = target.hostname.replace(/^\[|\]$/g, '');
+    if (net.isIP(host) && isBlockedAddress(host)) {
+        return res.status(400).json({ ok: false, error: 'URL not allowed' });
+    }
 
+    let answered = false;
+    const reply = (status, body) => {
+        if (answered) return;
+        answered = true;
+        res.status(status).json(body);
+    };
 
-    const request = proto.get(avatar_url, (response) => {
-        let data = '';
-        response.on('data', chunk => { data += chunk; });
-        response.on('end', () => {
+    const proto = target.protocol === 'https:' ? https : http;
 
-            db.query(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500) DEFAULT NULL",
-                () => {
-                    db.query(
-                        'UPDATE users SET avatar_url = ? WHERE id = ?',
-                        [avatar_url, req.session.user.id],
-                        (err) => {
-                            if (err) return res.json({ ok: false, error: 'DB error: ' + err.message });
-                            db.query('SELECT * FROM users WHERE id = ?', [req.session.user.id], (err, users) => {
-                                if (!err && users.length) req.session.user = users[0];
-                            });
+    const request = proto.get(target, { lookup: safeLookup }, (response) => {
+        const contentType = String(response.headers['content-type'] || '').toLowerCase();
+        response.resume();
+        if (response.statusCode !== 200 || !contentType.startsWith('image/')) {
+            request.destroy();
+            return reply(400, { ok: false, error: 'URL does not point to an image' });
+        }
 
-                            auditLog(req.session.user.id, 'AVATAR_URL_SET', `url: ${avatar_url}`, req);
-            res.json({ ok: true, fetched: data.substring(0, 2000), url: avatar_url });
-                        }
-                    );
-                }
-            );
-        });
+        db.query(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500) DEFAULT NULL",
+            () => {
+                db.query(
+                    'UPDATE users SET avatar_url = ? WHERE id = ?',
+                    [avatar_url, req.session.user.id],
+                    (err) => {
+                        if (err) return reply(500, { ok: false, error: 'Could not save avatar' });
+                        db.query('SELECT * FROM users WHERE id = ?', [req.session.user.id], (err, users) => {
+                            if (!err && users.length) req.session.user = users[0];
+                        });
+
+                        auditLog(req.session.user.id, 'AVATAR_URL_SET', `url: ${avatar_url}`, req);
+                        reply(200, { ok: true, url: avatar_url });
+                    }
+                );
+            }
+        );
     });
 
-    request.on('error', (err) => {
-        res.json({ ok: false, error: err.message });
+    request.on('error', () => {
+        reply(400, { ok: false, error: 'Could not fetch image from that URL' });
     });
 
     request.setTimeout(5000, () => {
         request.destroy();
-        res.json({ ok: false, error: 'Request timed out' });
+        reply(400, { ok: false, error: 'Request timed out' });
     });
 });
 
