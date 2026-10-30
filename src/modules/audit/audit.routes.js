@@ -18,14 +18,23 @@ router.get('/api/v1/events', (req, res) => {
     );
 });
 
+// PWN-014 (SQLi): the search term travels as a bound parameter, never as SQL text.
+const SEARCH_MAX_LENGTH = 100;
+
+// Escapes LIKE wildcards so the term is matched literally.
+function likePattern(term) {
+    return '%' + term.replace(/[\\%_]/g, '\\$&') + '%';
+}
+
 router.get('/admin/security', requireAdmin, (req, res) => {
-    const search = req.query.search || '';
+    const search = String(req.query.search || '').trim().slice(0, SEARCH_MAX_LENGTH);
 
     const sql = search
-        ? `SELECT a.*, u.username FROM audit_log a LEFT JOIN users u ON a.user_id = u.id WHERE a.action LIKE '%${search}%' OR a.detail LIKE '%${search}%' ORDER BY a.created_at DESC LIMIT 200`
+        ? 'SELECT a.*, u.username FROM audit_log a LEFT JOIN users u ON a.user_id = u.id WHERE a.action LIKE ? OR a.detail LIKE ? ORDER BY a.created_at DESC LIMIT 200'
         : 'SELECT a.*, u.username FROM audit_log a LEFT JOIN users u ON a.user_id = u.id ORDER BY a.created_at DESC LIMIT 200';
+    const params = search ? [likePattern(search), likePattern(search)] : [];
 
-    db.query(sql, (err, auditLogs) => {
+    db.query(sql, params, (err, auditLogs) => {
         if (err) auditLogs = [];
         res.render('admin', {
             user: req.session.user,
