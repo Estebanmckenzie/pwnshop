@@ -127,8 +127,10 @@ router.post('/verify-otp', otpLimiter, (req, res) => {
                 delete req.session.pendingNext;
                 delete req.session.pendingInboxToken;
 
-                if (nextUrl && nextUrl.startsWith('/')) return res.redirect(nextUrl);
-                res.redirect(nextUrl || '/');
+                if (nextUrl && nextUrl.startsWith('/') && !nextUrl.startsWith('//')) {
+                    return res.redirect(nextUrl);
+                }
+                res.redirect('/');
             });
         }
     );
@@ -208,7 +210,9 @@ router.post('/register', registerLimiter, (req, res) => {
                 (err) => {
                     if (err) return res.render('register', { error: err.sqlMessage, next: next || '' });
                     auditLog(null, 'ACCOUNT_REGISTERED', `username: ${username} | email: ${email} | role: user`, req);
-                    if (next && next.trim()) return res.redirect(next);
+                    if (next && next.trim() && next.trim().startsWith('/') && !next.trim().startsWith('//')) {
+                        return res.redirect(next.trim());
+                    }
                     res.redirect('/login?registered=1');
                 }
             );
