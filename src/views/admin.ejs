@@ -1149,16 +1149,18 @@
         <div class="modal-icon"><i class="bi bi-trash3-fill"></i></div>
         <div class="modal-title">Clear the audit log?</div>
         <p class="modal-body">
-            All log entries will be permanently deleted. A single record of this action will remain.<br><br>
-            This cannot be undone.
+            All log entries will be removed from this view and moved to the audit archive. A record of this action will remain.<br><br>
+            Confirm with your admin password.
         </p>
+        <form id="resetLogForm" method="POST" action="/admin/reset-log" style="margin-bottom:16px;">
+            <input type="password" name="password" class="search-input" placeholder="Your password" required autocomplete="current-password" style="width:100%;">
+        </form>
         <div class="modal-actions">
             <button class="btn-modal-cancel" onclick="closeResetModal()">Cancel</button>
             <button class="btn-modal-confirm" onclick="submitResetLog()">Yes, clear it</button>
         </div>
     </div>
 </div>
-<form id="resetLogForm" method="POST" action="/admin/reset-log" style="display:none"></form>
 
 <!-- Delete User Modal -->
 <div class="modal-backdrop" id="deleteUserModal">
@@ -1180,7 +1182,7 @@
 // ── Reset log modal ──
 function openResetModal()  { document.getElementById('resetLogModal').classList.add('open'); }
 function closeResetModal() { document.getElementById('resetLogModal').classList.remove('open'); }
-function submitResetLog()  { document.getElementById('resetLogForm').submit(); }
+function submitResetLog()  { document.getElementById('resetLogForm').requestSubmit(); }
 document.getElementById('resetLogModal').addEventListener('click', function(e) {
     if (e.target === this) closeResetModal();
 });
