@@ -32,8 +32,24 @@ function clientIp(req) {
     return net.isIP(ip) ? ip : 'unknown';
 }
 
+// PWN-027: secrets never reach the audit log, whatever module calls auditLog().
+const SECRET_KEYS = 'password|passwd|pwd|otp|submitted|token|secret|api_key';
+const REDACTED = '[REDACTED]';
+// JSON details ("password":"...") keep their structure; only the value is replaced.
+const SECRET_JSON_FIELD = new RegExp(`"(${SECRET_KEYS})"\\s*:\\s*(?:"(?:[^"\\\\]|\\\\.)*"|[^,}]*)`, 'gi');
+// Text details ("password: ..."): a secret may contain spaces or "|", so everything after the key is dropped.
+const SECRET_TEXT_FIELD = new RegExp(`\\b(${SECRET_KEYS})\\s*[:=].*$`, 'i');
+
+function redactSecrets(detail) {
+    if (detail.trimStart().startsWith('{')) {
+        return detail.replace(SECRET_JSON_FIELD, `"$1":"${REDACTED}"`);
+    }
+    return detail.replace(SECRET_TEXT_FIELD, `$1: ${REDACTED}`);
+}
+
 function cleanDetail(detail) {
-    return String(detail).replace(LOG_CONTROL_CHARS, ' ').substring(0, DETAIL_MAX_LENGTH);
+    const singleLine = String(detail).replace(LOG_CONTROL_CHARS, ' ');
+    return redactSecrets(singleLine).substring(0, DETAIL_MAX_LENGTH);
 }
 
 function auditLog(userId, action, detail, req) {
