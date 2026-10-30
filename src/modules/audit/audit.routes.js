@@ -5,6 +5,7 @@ const express = require('express');
 const { db } = require('../../shared/db');
 const { auditLog } = require('../../shared/audit-core');
 const { requireAdmin } = require('../../shared/helpers');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
 
 router.get('/api/v1/events', (req, res) => {
@@ -39,15 +40,86 @@ router.get('/admin/security', requireAdmin, (req, res) => {
     });
 });
 
+// LOG-04: clearing the log never destroys evidence. Rows are moved to audit_log_archive
+// (no app route reads or deletes it) inside one transaction, and ids are not reset.
+function ensureAuditArchiveTable(cb) {
+    db.query(
+        `CREATE TABLE IF NOT EXISTS audit_log_archive (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            original_id INT NOT NULL,
+            user_id     INT DEFAULT NULL,
+            action      VARCHAR(60) NOT NULL,
+            detail      TEXT,
+            ip          VARCHAR(120),
+            created_at  TIMESTAMP NULL DEFAULT NULL,
+            archived_by INT NOT NULL,
+            archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        cb
+    );
+}
+
+ensureAuditArchiveTable(() => {});
+
+function securityRedirect(res, key, message) {
+    res.redirect(`/admin/security?${key}=` + encodeURIComponent(message));
+}
+
+// Copies every row up to maxId into the archive, then deletes exactly those rows.
+function archiveAndClearLog(adminId, cb) {
+    db.getConnection((connErr, conn) => {
+        if (connErr) return cb(connErr);
+        const fail = (err) => conn.rollback(() => { conn.release(); cb(err); });
+
+        conn.beginTransaction((txErr) => {
+            if (txErr) { conn.release(); return cb(txErr); }
+            conn.query('SELECT COALESCE(MAX(id), 0) AS maxId FROM audit_log', (err, rows) => {
+                if (err) return fail(err);
+                const maxId = rows[0].maxId;
+                conn.query(
+                    `INSERT INTO audit_log_archive (original_id, user_id, action, detail, ip, created_at, archived_by)
+                     SELECT id, user_id, action, detail, ip, created_at, ? FROM audit_log WHERE id <= ?`,
+                    [adminId, maxId],
+                    (err, archived) => {
+                        if (err) return fail(err);
+                        conn.query('DELETE FROM audit_log WHERE id <= ?', [maxId], (err, deleted) => {
+                            if (err) return fail(err);
+                            if (deleted.affectedRows !== archived.affectedRows) {
+                                return fail(new Error('archive/delete row count mismatch'));
+                            }
+                            conn.commit((err) => {
+                                if (err) return fail(err);
+                                conn.release();
+                                cb(null, archived.affectedRows);
+                            });
+                        });
+                    }
+                );
+            });
+        });
+    });
+}
+
 router.post('/admin/reset-log', requireAdmin, (req, res) => {
-    db.query('DELETE FROM audit_log WHERE 1=1', (err) => {
-        if (err) return res.redirect('/admin/security?error=Failed to reset log');
+    const admin = req.session.user;
+    const password = String(req.body.password || '');
+    if (!password) return securityRedirect(res, 'error', 'Enter your password to clear the log');
 
+    // Destructive action: re-authenticate the admin before touching the log.
+    db.query('SELECT password FROM users WHERE id = ? AND role = ?', [admin.id, 'admin'], (err, rows) => {
+        if (err || !rows.length) return securityRedirect(res, 'error', 'Could not verify your password');
+        bcrypt.compare(password, rows[0].password, (bcryptErr, match) => {
+            if (bcryptErr || !match) {
+                auditLog(admin.id, 'AUDIT_LOG_RESET_DENIED', `admin: ${admin.username} | reason: incorrect password`, req);
+                return securityRedirect(res, 'error', 'Incorrect password');
+            }
 
-        db.query('ALTER TABLE audit_log AUTO_INCREMENT = 1', () => {
-            auditLog(req.session.user.id, 'AUDIT_LOG_RESET',
-                `admin: ${req.session.user.username} - log cleared`, req);
-            res.redirect('/admin/security?success=Audit log cleared');
+            archiveAndClearLog(admin.id, (err, archivedCount) => {
+                if (err) return securityRedirect(res, 'error', 'Failed to reset log');
+                auditLog(admin.id, 'AUDIT_LOG_RESET',
+                    `admin: ${admin.username} | archived: ${archivedCount} entries`, req);
+                securityRedirect(res, 'success', `Audit log cleared (${archivedCount} entries archived)`);
+            });
         });
     });
 });
