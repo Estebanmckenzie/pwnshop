@@ -73,6 +73,8 @@ const PICKUP_STORES = [
     { id: 'aba-exp',     name: 'Pwnshop Aba Express',     address: 'Aba-Owerri Road, Aba, Abia State',               zone: 'others' },
 ];
 
+const SAFE_ORDER_RE = /^[0-9]+$/;
+
 function getCommissionRate(category) {
     if (!category) return DEFAULT_COMMISSION;
     return CATEGORY_COMMISSION[category.toLowerCase().trim()] || DEFAULT_COMMISSION;
@@ -1121,28 +1123,10 @@ router.get('/invoice', (req, res) => {
     const order = req.query.order;
     if (!order) return res.redirect('/profile');
 
-    const fs = require('fs');
-
-
-
-
-
-    if (order.startsWith('..')) {
-        return res.render('invoice', {
-            user: req.session.user,
-            orderId: order,
-            order: null,
-            items: [],
-            fileContent: null,
-            filePath: null
-        });
+    if (!SAFE_ORDER_RE.test(order)) {
+        auditLog(req.session.user.id, 'PATH_TRAVERSAL_ATTEMPT', `order: ${order}`, req);
+        return res.status(400).send('Número de pedido inválido');
     }
-
-    const isNumeric = /^\d+$/.test(order);
-    const baseDir   = path.join(__dirname, '../../../public', 'invoices');
-    const filePath  = isNumeric
-        ? path.join(baseDir, order + '.txt')
-        : path.join(baseDir, order);
 
     db.query(
         `SELECT o.*, u.username, u.email, u.phone
@@ -1170,18 +1154,7 @@ router.get('/invoice', (req, res) => {
                     }
                 );
             } else {
-                fs.readFile(filePath, 'utf8', (ferr, data) => {
-                    auditLog(req.session.user.id, 'INVOICE_FILE_READ',
-                        `order: ${order} | path: ${filePath} | found: ${!ferr}`, req);
-                    res.render('invoice', {
-                        user: req.session.user,
-                        orderId: order,
-                        order: null,
-                        items: [],
-                        fileContent: ferr ? null : data,
-                        filePath: null
-                    });
-                });
+                return res.status(404).send('Factura no encontrada');
             }
         }
     );
