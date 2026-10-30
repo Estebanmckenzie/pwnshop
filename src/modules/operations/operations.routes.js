@@ -1108,13 +1108,17 @@ router.post('/admin/update-order-status', requireAdmin, (req, res) => {
     });
 });
 
+function sanitizeLogField(v) {
+    return String(v == null ? '' : v).replace(/[|\r\n]/g, ' ').substring(0, 200);
+}
+
 router.post('/admin/topup-wallet', requireAdmin, (req, res) => {
     const parsed = parseFloat(req.body.amount);
     if (isNaN(parsed) || parsed <= 0) return res.redirect('/admin/users?error=Invalid amount');
     db.query('UPDATE users SET wallet_amount = wallet_amount + ? WHERE id = ?', [parsed, req.body.user_id], (err) => {
         if (err) return res.redirect('/admin/users?error=Database error');
         auditLog(req.session.user.id, 'WALLET_TOPUP',
-            `admin: ${req.session.user.username} | target_user_id: ${req.body.user_id} | amount: ₦${parsed.toFixed(2)}`, req);
+            `admin: ${sanitizeLogField(req.session.user.username)} | target_user_id: ${parseInt(req.body.user_id) || 0} | amount: ₦${parsed.toFixed(2)}`, req);
         res.redirect('/admin/users?success=Shopping wallet topped up - added ₦' + parsed.toFixed(2));
     });
 });
@@ -1130,7 +1134,7 @@ router.post('/admin/topup-seller-wallet', requireAdmin, (req, res) => {
         db.query('UPDATE users SET seller_wallet = seller_wallet + ? WHERE id = ?', [parsed, req.body.user_id], (err2) => {
             if (err2) return res.redirect('/admin/users?error=Database error');
             auditLog(req.session.user.id, 'SELLER_WALLET_CREDIT',
-                `admin: ${req.session.user.username} | target_user_id: ${req.body.user_id} | seller: ${rows[0].username} | amount: ₦${parsed.toFixed(2)} | reason: ${reason}`, req);
+                `admin: ${sanitizeLogField(req.session.user.username)} | target_user_id: ${parseInt(req.body.user_id) || 0} | seller: ${sanitizeLogField(rows[0].username)} | amount: ₦${parsed.toFixed(2)} | reason: ${sanitizeLogField(reason)}`, req);
             res.redirect('/admin/users?success=Seller earnings wallet credited - added ₦' + parsed.toFixed(2) + ' to ' + rows[0].username);
         });
     });
