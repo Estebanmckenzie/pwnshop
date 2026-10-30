@@ -384,6 +384,30 @@ function applyDiscount(coupon, cart_total, userId, code, req, res) {
     });
 }
 
+function validateCouponForCheckout(coupon, userId, cartItems, cb) {
+    if (coupon.max_total_uses !== null && coupon.total_used >= coupon.max_total_uses) {
+        return cb(new Error('This coupon has reached its maximum usage limit'));
+    }
+    db.query(
+        'SELECT COUNT(*) AS cnt FROM coupon_uses WHERE coupon_id = ? AND user_id = ?',
+        [coupon.id, userId],
+        (err2, rows) => {
+            if (err2) return cb(new Error('Database error'));
+            const maxPerUser = coupon.max_uses_per_user || 1;
+            if (rows[0].cnt >= maxPerUser) {
+                return cb(new Error(`You have already used this coupon (limit: ${maxPerUser} per user)`));
+            }
+            if (coupon.allowed_category) {
+                const hasCategory = cartItems.some(i => i.category === coupon.allowed_category);
+                if (!hasCategory) {
+                    return cb(new Error(`This coupon is only valid for ${coupon.allowed_category} products`));
+                }
+            }
+            cb(null);
+        }
+    );
+}
+
 router.get('/checkout', (req, res) => {
     if (!req.session.user) return res.redirect('/login');
     const userId = req.session.user.id;
@@ -445,15 +469,6 @@ router.post('/checkout', checkoutLimiter, (req, res) => {
     const vbCardExpiry = String(req.body.vb_card_expiry || '').trim();
     const vbCardCvv = String(req.body.vb_card_cvv || '').trim();
     const vbCardName = String(req.body.vb_card_name || req.session.user.username || '').trim();
-
-
-
-
-
-
-
-
-
 
     let coupon_code = req.body.coupon_code;
     if (Array.isArray(coupon_code)) {
@@ -715,13 +730,17 @@ router.post('/checkout', checkoutLimiter, (req, res) => {
                     'SELECT * FROM coupons WHERE code = ? AND is_active = TRUE',
                     [coupon_code.trim().toUpperCase()],
                     (err, coupons) => {
-                        if (!err && coupons.length) {
+                        if (err || !coupons.length) return proceedWithTotal(baseTotal, null, 0);
+
+                        validateCouponForCheckout(coupons[0], userId, items, (validationErr) => {
+                            if (validationErr) {
+                                auditLog(userId, 'COUPON_CHECKOUT_REJECTED', validationErr.message, req);
+                                return proceedWithTotal(baseTotal, null, 0);
+                            }
                             const d        = (baseTotal * coupons[0].discount_percent) / 100;
                             const newTotal = Math.max(0, baseTotal - d);
                             proceedWithTotal(newTotal, coupon_code.trim().toUpperCase(), parseFloat(d.toFixed(2)));
-                        } else {
-                            proceedWithTotal(baseTotal, null, 0);
-                        }
+                        });
                     }
                 );
             } else {
