@@ -6,14 +6,14 @@ const crypto = require('crypto');
 const { Resend } = require('resend');
 const { db } = require('../../shared/db');
 const { auditLog } = require('../../shared/audit-core');
-const { adminLoginLimiter, loginLimiter, registerLimiter, forgotPasswordLimiter, resetPasswordLimiter } = require('../../shared/rate-limiters');
+const { adminLoginLimiter, loginLimiter, registerLimiter, forgotPasswordLimiter, resetPasswordLimiter, otpLimiter } = require('../../shared/rate-limiters');
 const router = express.Router();
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const RESEND_FROM = process.env.RESEND_FROM || 'noreply@pwnshop.com';
 
 function generateResetToken() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return crypto.randomInt(100000, 1000000).toString();
 }
 
 function sendMail(userId, toEmail, subject, body) {
@@ -66,6 +66,7 @@ router.post('/login', loginLimiter, (req, res) => {
             const otp       = generateResetToken();
             const expiresAt = new Date(Date.now() + 600000);
 
+            db.query('UPDATE otp_codes SET used = TRUE WHERE user_id = ? AND used = FALSE', [user.id], () => {
             db.query(
                 'INSERT INTO otp_codes (user_id, code, expires_at) VALUES (?, ?, ?)',
                 [user.id, otp, expiresAt],
@@ -86,6 +87,7 @@ router.post('/login', loginLimiter, (req, res) => {
                     res.redirect('/verify-otp');
                 }
             );
+            });
         });
     });
 });
@@ -96,7 +98,7 @@ router.get('/verify-otp', (req, res) => {
     res.render('verify-otp', { error: null, inboxToken: req.session.pendingInboxToken || '' });
 });
 
-router.post('/verify-otp', (req, res) => {
+router.post('/verify-otp', otpLimiter, (req, res) => {
     if (req.session.user) return res.redirect('/');
     if (!req.session.pendingUserId) return res.redirect('/login');
 
@@ -158,6 +160,7 @@ router.post('/admin/login', adminLoginLimiter, (req, res) => {
             const otp       = generateResetToken();
             const expiresAt = new Date(Date.now() + 600000);
 
+            db.query('UPDATE otp_codes SET used = TRUE WHERE user_id = ? AND used = FALSE', [admin.id], () => {
             db.query(
                 'INSERT INTO otp_codes (user_id, code, expires_at) VALUES (?, ?, ?)',
                 [admin.id, otp, expiresAt],
@@ -178,6 +181,7 @@ router.post('/admin/login', adminLoginLimiter, (req, res) => {
                     res.redirect('/verify-otp');
                 }
             );
+            });
         });
     });
 });

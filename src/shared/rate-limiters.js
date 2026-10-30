@@ -58,6 +58,7 @@ const reviewLimiter         = createRateLimiter(10);
 const avatarLimiter         = createRateLimiter(10);
 const forgotPasswordLimiter = createRateLimiter(10);
 const resetPasswordLimiter  = createRateLimiter(10);
+const otpLimiter            = createRateLimiter(10);
 const wishlistLimiter       = createRateLimiter(30);
 const cartLimiter           = createRateLimiter(50);
 const couponLimiter         = createRateLimiter(20);
@@ -67,4 +68,4 @@ const registerSellerLimiter = createRateLimiter(5);
 const accountDeleteLimiter  = createRateLimiter(5);
 const mailReadLimiter       = createRateLimiter(30);
 
-module.exports = { rateLimitMaps, globalGetLimiter, adminLoginLimiter, loginLimiter, registerLimiter, checkoutLimiter, searchLimiter, addProductLimiter, reviewLimiter, avatarLimiter, forgotPasswordLimiter, resetPasswordLimiter, wishlistLimiter, cartLimiter, couponLimiter, trackLimiter, sellerPreviewLimiter, registerSellerLimiter, accountDeleteLimiter, mailReadLimiter, createRateLimiter };
+module.exports = { rateLimitMaps, globalGetLimiter, adminLoginLimiter, loginLimiter, registerLimiter, checkoutLimiter, searchLimiter, addProductLimiter, reviewLimiter, avatarLimiter, forgotPasswordLimiter, resetPasswordLimiter, otpLimiter, wishlistLimiter, cartLimiter, couponLimiter, trackLimiter, sellerPreviewLimiter, registerSellerLimiter, accountDeleteLimiter, mailReadLimiter, createRateLimiter };
