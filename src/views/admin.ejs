@@ -757,9 +757,9 @@
         <div class="sec-card">
             <h3><i class="bi bi-journal-text" style="color:var(--purple-mid)"></i> Security Audit Log</h3>
             <p style="color:var(--gray-500);font-size:0.82rem;margin-bottom:16px;">
-                Live log of all security-relevant events. Also accessible publicly at
+                Live log of all security-relevant events. Also available as JSON at
                 <a href="/api/v1/events" target="_blank" style="color:var(--purple-mid);font-weight:600;">/api/v1/events</a>
-                with no authentication required.
+                (admin session required).
             </p>
 
 
@@ -840,7 +840,7 @@
                 </div>
                 <p style="font-size:0.72rem;color:var(--gray-500);margin-top:10px;">
                     Showing <%= auditLogs.length %> most recent entries.
-                    Also available at <a href="/api/v1/events" target="_blank" style="color:var(--purple-mid);">/api/v1/events</a> (no auth required).
+                    Also available at <a href="/api/v1/events" target="_blank" style="color:var(--purple-mid);">/api/v1/events</a> (admin only).
                 </p>
             <% } %>
         </div>

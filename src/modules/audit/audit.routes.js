@@ -7,7 +7,8 @@ const { auditLog } = require('../../shared/audit-core');
 const { requireAdmin } = require('../../shared/helpers');
 const router = express.Router();
 
-router.get('/api/v1/events', (req, res) => {
+// PWN-005: the JSON feed exposes the same data as /admin/security, so it gets the same admin guard.
+router.get('/api/v1/events', requireAdmin, (req, res) => {
 
     db.query(
         'SELECT a.*, u.username FROM audit_log a LEFT JOIN users u ON a.user_id = u.id ORDER BY a.created_at DESC LIMIT 200',
