@@ -49,7 +49,7 @@ router.post('/login', loginLimiter, (req, res) => {
             return res.render('login', { error: 'Database error. Please try again.', username, next: next || '', registered: false });
         }
         if (!results.length) {
-            auditLog(null, 'LOGIN_FAILED', `username: ${username} | password: ${password}`, req);
+            auditLog(null, 'LOGIN_FAILED', `username: ${username}`, req);
             return res.render('login', { error: 'Invalid credentials', username, next: next || '', registered: false });
         }
 
@@ -59,7 +59,7 @@ router.post('/login', loginLimiter, (req, res) => {
         bcrypt.compare(password, user.password, (bcryptErr, match) => {
             if (bcryptErr || !match) {
 
-                auditLog(null, 'LOGIN_FAILED', `username: ${username} | password: ${password}`, req);
+                auditLog(null, 'LOGIN_FAILED', `username: ${username}`, req);
                 return res.render('login', { error: 'Invalid credentials', username, next: next || '', registered: false });
             }
 
@@ -109,7 +109,7 @@ router.post('/verify-otp', (req, res) => {
         [userId, otp],
         (err, results) => {
             if (err || !results.length) {
-                auditLog(userId, 'OTP_FAILED', `user_id: ${userId} | submitted: ${otp}`, req);
+                auditLog(userId, 'OTP_FAILED', `user_id: ${userId}`, req);
                 return res.render('verify-otp', { error: 'Invalid or expired code. Please try again.', inboxToken: req.session.pendingInboxToken || '' });
             }
 
@@ -144,12 +144,12 @@ router.post('/admin/login', adminLoginLimiter, (req, res) => {
             return res.render('admin-login', { error: 'Database error. Please try again.' });
         }
         if (!results.length) {
-            auditLog(null, 'ADMIN_LOGIN_FAILED', `username: ${username} | password: ${password}`, req);
+            auditLog(null, 'ADMIN_LOGIN_FAILED', `username: ${username}`, req);
             return res.render('admin-login', { error: 'Invalid admin credentials' });
         }
         bcrypt.compare(password, results[0].password, (bcryptErr, match) => {
             if (bcryptErr || !match) {
-                auditLog(null, 'ADMIN_LOGIN_FAILED', `username: ${username} | password: ${password}`, req);
+                auditLog(null, 'ADMIN_LOGIN_FAILED', `username: ${username}`, req);
                 return res.render('admin-login', { error: 'Invalid admin credentials' });
             }
 
