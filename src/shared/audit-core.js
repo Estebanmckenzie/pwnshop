@@ -2,6 +2,7 @@
    DUEÑO LÓGICO: M4 · Logs/Auditoría (Yerald Sánchez).
    Vive en shared/ solo porque TODOS los módulos llaman a auditLog(). */
 
+const net = require('net');
 const { db } = require('./db');
 
 function ensureAuditTable(cb) {
@@ -20,13 +21,25 @@ function ensureAuditTable(cb) {
 
 ensureAuditTable(() => {});
 
+// PWN-028: the client never chooses the logged IP, and detail cannot forge extra log lines.
+const DETAIL_MAX_LENGTH = 1000;
+const LOG_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
+
+// req.ip is the TCP peer unless Express 'trust proxy' names a trusted proxy;
+// X-Forwarded-For sent by the client is never read directly.
+function clientIp(req) {
+    const ip = String(req.ip || (req.socket && req.socket.remoteAddress) || '');
+    return net.isIP(ip) ? ip : 'unknown';
+}
+
+function cleanDetail(detail) {
+    return String(detail).replace(LOG_CONTROL_CHARS, ' ').substring(0, DETAIL_MAX_LENGTH);
+}
+
 function auditLog(userId, action, detail, req) {
-
-    const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
-
     db.query(
         'INSERT INTO audit_log (user_id, action, detail, ip) VALUES (?, ?, ?, ?)',
-        [userId || null, action, String(detail).substring(0, 1000), ip]
+        [userId || null, action, cleanDetail(detail), clientIp(req)]
     );
 }
 
