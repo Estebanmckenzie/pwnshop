@@ -188,7 +188,7 @@ router.get('/register', (req, res) => {
 });
 
 router.post('/register', registerLimiter, (req, res) => {
-    const { username, email, phone, password, role, next } = req.body;
+    const { username, email, phone, password, next } = req.body;
     const refCode = (req.body.referral_code || '').trim().toUpperCase();
 
     bcrypt.hash(password, 12, (hashErr, hashedPassword) => {
@@ -200,10 +200,10 @@ router.post('/register', registerLimiter, (req, res) => {
         const doInsert = (startingWallet) => {
             db.query(
                 'INSERT INTO users (username, email, phone, password, role, wallet_amount, inbox_token, referral_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [username, email, phone, hashedPassword, role || 'user', startingWallet, inboxToken, newUserCode],
+                [username, email, phone, hashedPassword, 'user', startingWallet, inboxToken, newUserCode],
                 (err) => {
                     if (err) return res.render('register', { error: err.sqlMessage, next: next || '' });
-                    auditLog(null, 'ACCOUNT_REGISTERED', `username: ${username} | email: ${email} | role: ${role || 'user'}`, req);
+                    auditLog(null, 'ACCOUNT_REGISTERED', `username: ${username} | email: ${email} | role: user`, req);
                     if (next && next.trim()) return res.redirect(next);
                     res.redirect('/login?registered=1');
                 }
