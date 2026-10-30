@@ -41,12 +41,12 @@ router.post('/login', loginLimiter, (req, res) => {
 
 
 
-    const query = `SELECT * FROM users WHERE (username='${username}' OR email='${username}')`;
+    const query = 'SELECT * FROM users WHERE (username = ? OR email = ?)';
 
-    db.query(query, (err, results) => {
+    db.query(query, [username, username], (err, results) => {
         if (err) {
             auditLog(null, 'SQLI_ATTEMPT', `endpoint: POST /login | input: ${username}`, req);
-            return res.render('login', { error: 'Database error: ' + err.sqlMessage, username, next: next || '', registered: false });
+            return res.render('login', { error: 'Database error. Please try again.', username, next: next || '', registered: false });
         }
         if (!results.length) {
             auditLog(null, 'LOGIN_FAILED', `username: ${username} | password: ${password}`, req);
@@ -137,11 +137,11 @@ router.get('/admin/login', (req, res) => res.render('admin-login', { error: null
 router.post('/admin/login', adminLoginLimiter, (req, res) => {
     const { username, password } = req.body;
 
-    const query = `SELECT * FROM users WHERE username='${username}' AND role='admin'`;
-    db.query(query, (err, results) => {
+    const query = "SELECT * FROM users WHERE username = ? AND role = 'admin'";
+    db.query(query, [username], (err, results) => {
         if (err) {
             auditLog(null, 'SQLI_ATTEMPT', `endpoint: POST /admin/login | input: ${username}`, req);
-            return res.render('admin-login', { error: 'Database error: ' + err.sqlMessage });
+            return res.render('admin-login', { error: 'Database error. Please try again.' });
         }
         if (!results.length) {
             auditLog(null, 'ADMIN_LOGIN_FAILED', `username: ${username} | password: ${password}`, req);
