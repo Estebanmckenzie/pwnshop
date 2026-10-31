@@ -197,6 +197,10 @@ router.post('/register', registerLimiter, (req, res) => {
     const { username, email, phone, password, next } = req.body;
     const refCode = (req.body.referral_code || '').trim().toUpperCase();
 
+    if (!password || password.length < 10) {
+        return res.render('register', { error: 'La contraseña debe tener al menos 10 caracteres.', next: next || '' });
+    }
+
     bcrypt.hash(password, 12, (hashErr, hashedPassword) => {
         if (hashErr) return res.render('register', { error: 'Error securing password. Try again.', next: next || '' });
 
