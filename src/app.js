@@ -26,7 +26,11 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'weak-secret-123',
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: false }
+    cookie: {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax'
+    }
 }));
 
 
