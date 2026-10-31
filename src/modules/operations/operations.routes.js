@@ -124,11 +124,7 @@ router.post('/wallet/topup/vulnbank', checkoutLimiter, async (req, res) => {
         return res.redirect('/profile?wallet_error=' + encodeURIComponent('Invalid top-up amount'));
     }
 
-    // VULNERABILITY (negative amount): In lab vuln mode the positive-amount
-    // guard is skipped. A learner can send amount=0.001 - Vulnbank charges
-    // essentially nothing - then pair it with credited_amount to credit any
-    // value they want. In strict mode the > 0 guard blocks this entirely.
-    if (!VULNBANK_LAB_VULN && amount <= 0) {
+    if (amount <= 0) {
         return res.redirect('/profile?wallet_error=' + encodeURIComponent('Amount must be greater than zero'));
     }
 
@@ -139,10 +135,7 @@ router.post('/wallet/topup/vulnbank', checkoutLimiter, async (req, res) => {
     const txRef = 'pwnshop_topup_' + userId + '_' + Date.now();
     const normalizedCardNumber = cardNumber.replace(/\s+/g, '');
     const payload = {
-        // VULNERABILITY (negative amount): In lab vuln mode, amount is sent
-        // as-is with no rounding or clamping - so 0.001 goes to Vulnbank
-        // exactly as 0.001 rather than being normalised to a safe minimum.
-        amount: VULNBANK_LAB_VULN ? amount : parseFloat(amount.toFixed(2)),
+        amount: parseFloat(amount.toFixed(2)),
         currency: 'NGN',
         merchant_order_id: txRef,
         description: 'Pwnshop wallet top-up',
@@ -158,9 +151,7 @@ router.post('/wallet/topup/vulnbank', checkoutLimiter, async (req, res) => {
 
     try {
         const chargeResp = await vulnbankRequest(VULNBANK_CHARGE_PATH, 'POST', payload);
-        const ref = VULNBANK_LAB_VULN
-            ? (getVulnbankReference(chargeResp) || txRef)
-            : txRef;
+        const ref = txRef;
 
         let verifyResp = chargeResp;
         const verifyPath = buildVulnbankVerifyPath(ref);
@@ -174,77 +165,36 @@ router.post('/wallet/topup/vulnbank', checkoutLimiter, async (req, res) => {
 
         const settled = isVulnbankSuccess(verifyResp);
         const remoteAmount = getVulnbankAmount(verifyResp);
-        // VULNERABILITY (#3): remoteAmount === null bypasses amount check entirely
-        const amountMatches = remoteAmount === null || Math.abs(remoteAmount - amount) < 0.01;
+        const amountMatches = remoteAmount !== null && Math.abs(remoteAmount - amount) < 0.01;
 
-        if (!VULNBANK_LAB_VULN && (!settled || !amountMatches)) {
+        if (!settled || !amountMatches) {
             return res.redirect('/profile?wallet_error=' + encodeURIComponent('Vulnbank charge was not settled'));
         }
 
-        // VULNERABILITY (#1): credited_amount is read from the request body when lab vuln is on
-        const creditedAmount = VULNBANK_LAB_VULN
-            ? parseFloat(req.body.credited_amount || amount)
-            : amount;
+        const creditedAmount = amount;
 
-        if (isNaN(creditedAmount)) {
-            return res.redirect('/profile?wallet_error=' + encodeURIComponent('Invalid credited amount'));
-        }
+        db.query('SELECT id FROM vulnbank_tx_log WHERE reference = ?', [ref], (chkErr, existing) => {
+            if (!chkErr && existing.length > 0) {
+                return res.redirect('/profile?wallet_error=' + encodeURIComponent('Payment reference already used'));
+            }
 
-        // VULNERABILITY (negative amount): In lab vuln mode the sign check on
-        // creditedAmount is removed. Sending credited_amount=-5000 would
-        // decrement the wallet. Combined with a tiny charge (amount=0.001)
-        // and a large positive credited_amount, a learner can essentially
-        // fund their wallet for free. In strict mode the <= 0 guard applies.
-        if (!VULNBANK_LAB_VULN && creditedAmount <= 0) {
-            return res.redirect('/profile?wallet_error=' + encodeURIComponent('Invalid credited amount'));
-        }
-
-        // VULNERABILITY (replay): In strict mode we check for duplicate references.
-        // In lab vuln mode the check is skipped - replaying a valid reference credits
-        // the wallet again without a new charge.
-        const doCredit = () => {
-            // VULNERABILITY (race condition): non-atomic SELECT then UPDATE creates a
-            // TOCTOU window. Two concurrent top-up requests can both read the same
-            // balance, both compute the same new value, and the second write wins -
-            // effectively crediting the wallet only once instead of twice, or the
-            // opposite: both succeed and the wallet is double-credited depending on timing.
-            db.query('SELECT wallet_amount FROM users WHERE id = ?', [userId], (selErr, selRows) => {
-                if (selErr || !selRows.length) {
+            db.query('UPDATE users SET wallet_amount = wallet_amount + ? WHERE id = ?', [creditedAmount, userId], (updErr) => {
+                if (updErr) {
                     return res.redirect('/profile?wallet_error=' + encodeURIComponent('Database error while funding wallet'));
                 }
-                const currentBalance = parseFloat(selRows[0].wallet_amount || 0);
-                const newBalance = currentBalance + creditedAmount;
 
-                db.query('UPDATE users SET wallet_amount = ? WHERE id = ?', [newBalance, userId], (updErr) => {
-                    if (updErr) {
-                        return res.redirect('/profile?wallet_error=' + encodeURIComponent('Database error while funding wallet'));
-                    }
+                db.query('INSERT INTO vulnbank_tx_log (user_id, reference, amount, flow) VALUES (?, ?, ?, ?)',
+                    [userId, ref, creditedAmount, 'wallet_topup'], () => {});
 
-                    db.query('INSERT INTO vulnbank_tx_log (user_id, reference, amount, flow) VALUES (?, ?, ?, ?)',
-                        [userId, ref, creditedAmount, 'wallet_topup'], () => {});
-
-                    db.query('SELECT * FROM users WHERE id = ?', [userId], (uErr, rows) => {
-                        if (!uErr && rows.length) req.session.user = rows[0];
-                        auditLog(userId, 'WALLET_TOPUP_VULNBANK',
-                            `ref: ${ref} | requested: ${amount.toFixed(2)} | credited: ${creditedAmount.toFixed(2)}`,
-                            req);
-                        res.redirect('/profile?wallet_success=' + encodeURIComponent('Wallet funded with Vulnbank: ₦' + creditedAmount.toFixed(2)));
-                    });
+                db.query('SELECT * FROM users WHERE id = ?', [userId], (uErr, rows) => {
+                    if (!uErr && rows.length) req.session.user = rows[0];
+                    auditLog(userId, 'WALLET_TOPUP_VULNBANK',
+                        `ref: ${ref} | requested: ${amount.toFixed(2)} | credited: ${creditedAmount.toFixed(2)}`,
+                        req);
+                    res.redirect('/profile?wallet_success=' + encodeURIComponent('Wallet funded with Vulnbank: ₦' + creditedAmount.toFixed(2)));
                 });
             });
-        };
-
-        if (!VULNBANK_LAB_VULN) {
-            db.query('SELECT id FROM vulnbank_tx_log WHERE reference = ?', [ref], (chkErr, existing) => {
-                if (!chkErr && existing.length > 0) {
-                    return res.redirect('/profile?wallet_error=' + encodeURIComponent('Payment reference already used'));
-                }
-                doCredit();
-            });
-        } else {
-            // Lab vuln mode: no duplicate reference check
-            doCredit();
-        }
+        });
 
     } catch (err) {
         const msg = extractVulnbankErrorMessage(err, 'Vulnbank request failed');
