@@ -247,7 +247,9 @@ router.post('/forgot-password', forgotPasswordLimiter, (req, res) => {
     const { email } = req.body;
     db.query('SELECT id, username, email, inbox_token FROM users WHERE email = ?', [email], (err, users) => {
         if (err) return res.render('forgot-password', { error: 'Database error', success: null, userId: null, inboxToken: '' });
-        if (!users.length) return res.render('forgot-password', { error: 'No account found with that email address.', success: null, userId: null, inboxToken: '' });
+        if (!users.length) {
+            return res.render('forgot-password', { error: null, success: 'Si el correo existe en nuestro sistema, recibirás un enlace de recuperación en breve.', userId: null, inboxToken: '' });
+        }
 
         const user   = users[0];
         const token  = generateResetToken();
@@ -299,7 +301,7 @@ router.post('/forgot-password', forgotPasswordLimiter, (req, res) => {
                 auditLog(user.id, 'PASSWORD_RESET_REQUESTED', `email: ${user.email}`, req);
                 res.render('forgot-password', {
                     error: null,
-                    success: `A password reset link has been sent to ${user.email}. Check your inbox (and spam folder).`,
+                    success: 'Si el correo existe en nuestro sistema, recibirás un enlace de recuperación en breve.',
                     userId: user.id,
                     inboxToken: user.inbox_token || ''
                 });
