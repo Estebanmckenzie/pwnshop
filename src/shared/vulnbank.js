@@ -2,7 +2,8 @@
 
 const http = require('http');
 const https = require('https');
-const { VULNBANK_BASE_URL, VULNBANK_MERCHANT_API_KEY, VULNBANK_MERCHANT_JWT, VULNBANK_AUTH_MODE, VULNBANK_VERIFY_PATH, VULNBANK_TIMEOUT_MS } = require('./config');
+const crypto = require('crypto');
+const { VULNBANK_BASE_URL, VULNBANK_MERCHANT_API_KEY, VULNBANK_MERCHANT_JWT, VULNBANK_AUTH_MODE, VULNBANK_VERIFY_PATH, VULNBANK_TIMEOUT_MS, VULNBANK_WEBHOOK_SECRET } = require('./config');
 
 function isVulnbankConfigured() {
     const hasAuth = VULNBANK_AUTH_MODE === 'jwt'
@@ -105,6 +106,16 @@ function buildVulnbankVerifyPath(referenceOrId) {
         .replace('{payment_id}', encodeURIComponent(referenceOrId));
 }
 
+function verifyVulnbankSignature(rawBody, signatureHeader) {
+    if (!VULNBANK_WEBHOOK_SECRET || !signatureHeader) return false;
+    const expected = crypto.createHmac('sha256', VULNBANK_WEBHOOK_SECRET).update(rawBody).digest('hex');
+    try {
+        return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(signatureHeader)));
+    } catch (_) {
+        return false;
+    }
+}
+
 function vulnbankRequest(relativePath, method = 'POST', payload = null) {
     return new Promise((resolve, reject) => {
         if (!isVulnbankConfigured()) {
@@ -138,15 +149,6 @@ function vulnbankRequest(relativePath, method = 'POST', payload = null) {
 
         if (body) options.headers['Content-Length'] = Buffer.byteLength(body);
 
-        // DEBUG: Log the request details
-        console.log('[Vulnbank Request]', {
-            url: target.toString(),
-            method,
-            authMode: VULNBANK_AUTH_MODE,
-            hasApiKey: !!VULNBANK_MERCHANT_API_KEY,
-            hasJwt: !!VULNBANK_MERCHANT_JWT
-        });
-
         const req = transport.request(options, (resp) => {
             let raw = '';
             resp.on('data', (chunk) => { raw += chunk; });
@@ -159,14 +161,13 @@ function vulnbankRequest(relativePath, method = 'POST', payload = null) {
                         parsed = { raw };
                     }
                 }
-                
-                // DEBUG: Log full response
-                console.log('[Vulnbank Response]', {
-                    statusCode: resp.statusCode,
-                    contentType: resp.headers['content-type'],
-                    body: parsed
-                });
-                
+
+                if (!verifyVulnbankSignature(raw, resp.headers['x-vulnbank-signature'])) {
+                    const sigErr = new Error('Vulnbank response signature invalid or missing');
+                    sigErr.statusCode = 502;
+                    return reject(sigErr);
+                }
+
                 if (resp.statusCode >= 200 && resp.statusCode < 300) {
                     return resolve(parsed);
                 }
