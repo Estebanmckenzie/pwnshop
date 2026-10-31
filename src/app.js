@@ -39,6 +39,9 @@ app.set('view engine', 'ejs');
 app.use(express.static(path.join(__dirname, '../public')));
 app.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     next();
 });
 
