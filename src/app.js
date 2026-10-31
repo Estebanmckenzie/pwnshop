@@ -23,7 +23,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
 app.use(session({
-    secret: 'weak-secret-123',
+    secret: process.env.SESSION_SECRET || 'weak-secret-123',
     resave: false,
     saveUninitialized: true,
     cookie: { secure: false }
